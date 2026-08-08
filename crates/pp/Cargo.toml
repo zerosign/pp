@@ -1,0 +1,12 @@
+[package]
+name = "pp"
+version.workspace = true
+edition.workspace = true
+description = "Shared core for pp: repository index & search"
+
+[dependencies]
+directories.workspace = true
+rayon.workspace = true
+fst.workspace = true
+serde.workspace = true
+toml.workspace = true

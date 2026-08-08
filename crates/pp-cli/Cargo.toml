@@ -1,0 +1,15 @@
+[package]
+name = "pp-cli"
+version.workspace = true
+edition.workspace = true
+description = "Interactive pp picker (skim) + CLI subcommands"
+
+[[bin]]
+name = "pp"
+path = "src/bin/pp.rs"
+
+[dependencies]
+pp = { path = "../pp" }
+clap.workspace = true
+clap_complete.workspace = true
+skim.workspace = true

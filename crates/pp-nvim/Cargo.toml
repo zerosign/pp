@@ -1,0 +1,14 @@
+[package]
+name = "pp-nvim"
+version.workspace = true
+edition.workspace = true
+description = "Exposes pp index & search functions for Neovim. UI is configured on the plugin side (plugin/init.lua)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pp = { path = "../pp" }
+
+[dev-dependencies]
+fst = "0.4"

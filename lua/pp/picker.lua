@@ -1,0 +1,465 @@
+-- pp.nvim — picker layer.
+--
+-- Default: a zero-dependency floating window backed by the pp FFI (cdylib).
+-- Every keystroke runs the search in Rust (`pp_search`); Lua only renders the
+-- returned matches, so no competing matcher re-filters the results. Falls
+-- back to fzf-lua (full list + fzf's own matcher) when the shared library is
+-- missing, and honours `config.options.picker` for a fully custom picker.
+--
+-- fzf-lua is still used for the post-selection `files` picker.
+
+local config = require('pp.config')
+local projects = require('pp.projects')
+local util = require('pp.util')
+
+local M = {}
+
+local ffi, lib
+local warned_fallback = false
+
+-- LuaJIT 2.1 extras: table.new pre-allocates, and localized string builtins
+-- keep the per-keystroke hot path in compiled traces.
+local table_new = require('table.new')
+local byte, sub = string.byte, string.sub
+
+-- ---------------------------------------------------------------------------
+-- FFI bridge (LuaJIT ffi.load of libpp_nvim.so)
+-- ---------------------------------------------------------------------------
+
+local MODES = {
+  substring = 0,
+  prefix = 1,
+  fuzzy = 2,
+  subseq = 3,
+}
+
+local function resolve_lib_path()
+  local configured = config.options.lib_path
+  if configured and vim.fn.filereadable(configured) == 1 then
+    return configured
+  end
+  -- Default: <plugin>/build/libpp_nvim.so — three dirnames up from picker.lua.
+  local source = debug.getinfo(1, 'S').source or ''
+  local file = source:sub(1, 1) == '@' and source:sub(2) or source
+  local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(file)))
+  local base = vim.fs.joinpath(root, 'build')
+  for _, name in ipairs({ 'libpp_nvim.so', 'libpp_nvim.dylib', 'libpp_nvim.dll' }) do
+    local candidate = vim.fs.joinpath(base, name)
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+  end
+  return nil
+end
+
+local function load_lib()
+  if lib then
+    return true
+  end
+  if not ffi then
+    local ok, result = pcall(require, 'ffi')
+    if not ok then
+      return false
+    end
+    ffi = result
+  end
+  local path = resolve_lib_path()
+  if not path then
+    return false
+  end
+  ffi.cdef[[
+    void *pp_search(const char *query, int mode, unsigned int distance, int limit);
+    void pp_string_free(void *ptr);
+    int pp_refresh(void);
+  ]]
+  local ok, handle = pcall(ffi.load, path)
+  if not ok then
+    util.notify('pp.nvim: failed to load ' .. path .. ': ' .. tostring(handle),
+      vim.log.levels.ERROR)
+    return false
+  end
+  lib = handle
+  return true
+end
+
+--- Split newline-separated FFI output into a list of lines.
+---
+--- Byte-scan rather than string.gmatch: the pattern-matching engine is a C
+--- call that would stitch (abort) the JIT trace on every keystroke, whereas
+--- string.byte / string.sub compile to native IR. `size_hint` pre-allocates
+--- the result table so it never grows dynamically.
+local function split_lines(text, size_hint)
+  local lines = table_new(size_hint, 0)
+  local line_start = 1
+  for i = 1, #text do
+    if byte(text, i) == 10 then -- '\n'
+      if i > line_start then
+        lines[#lines + 1] = sub(text, line_start, i - 1)
+      end
+      line_start = i + 1
+    end
+  end
+  if line_start <= #text then
+    lines[#lines + 1] = sub(text, line_start)
+  end
+  return lines
+end
+
+--- Search through the shared library. Returns a list of paths, or nil when
+--- the library failed (callers fall back or show an error).
+local function search(query, mode, limit)
+  if not load_lib() then
+    return nil
+  end
+  local ptr = lib.pp_search(query, MODES[mode] or 0, config.options.fuzzy_distance, limit or -1)
+  local ok, text = pcall(ffi.string, ptr)
+  -- Release the FFI result either way; only a null pointer (library error or
+  -- nil) skips the free.
+  if ptr ~= nil then
+    pcall(lib.pp_string_free, ptr)
+  end
+  if not ok then
+    return nil
+  end
+  return split_lines(text or '', config.options.max_results)
+end
+
+-- ---------------------------------------------------------------------------
+-- Floating picker (FFI-backed)
+-- ---------------------------------------------------------------------------
+
+local MODE_ORDER = { 'substring', 'fuzzy', 'prefix', 'subseq' }
+local NS = vim.api.nvim_create_namespace('pp-selection')
+
+-- Selection highlight. Linked to Visual so it follows the active colorscheme;
+-- a colorscheme that defines PpSelection itself takes precedence.
+if vim.tbl_isempty(vim.api.nvim_get_hl(0, { name = 'PpSelection' })) then
+  vim.api.nvim_set_hl(0, 'PpSelection', { link = 'Visual' })
+end
+
+local state = {
+  buf = nil,
+  win = nil,
+  prompt = nil,
+  results = {},
+  cursor = 1,
+  offset = 1, -- index of the first result row currently rendered in the window
+  mode = 'substring',
+  timer = nil,
+  on_select = nil,
+}
+
+local function next_mode(current)
+  for i, m in ipairs(MODE_ORDER) do
+    if m == current then
+      return MODE_ORDER[i % #MODE_ORDER + 1]
+    end
+  end
+  return MODE_ORDER[1]
+end
+
+local function close_float()
+  if state.timer then
+    state.timer:stop()
+    state.timer:close()
+    state.timer = nil
+  end
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.api.nvim_win_close(state.win, true)
+  end
+  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    vim.api.nvim_buf_delete(state.buf, { force = true })
+  end
+  state.win, state.buf = nil, nil
+  state.results, state.cursor, state.offset = {}, 1, 1
+end
+
+local function current_query()
+  local line = vim.api.nvim_buf_get_lines(state.buf, 0, 1, false)[1] or ''
+  local prompt = state.prompt or config.options.prompt
+  if line:sub(1, #prompt) == prompt then
+    return line:sub(#prompt + 1)
+  end
+  return line
+end
+
+--- Number of result rows that fit in the float window (the top two rows are
+--- the prompt and the mode indicator).
+local function visible_count()
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then
+    return 12
+  end
+  return math.max(1, vim.api.nvim_win_get_height(state.win) - 2)
+end
+
+--- Keep cursor and offset inside the current result list: clamp the cursor to
+--- the list length and pull the viewport back when the list shrinks.
+local function clamp_view()
+  local n = #state.results
+  if n == 0 then
+    state.cursor, state.offset = 1, 1
+    return
+  end
+  state.cursor = math.max(1, math.min(state.cursor, n))
+  local vis = visible_count()
+  state.offset = math.max(1, math.min(state.offset, n - vis + 1))
+end
+
+--- Render only the visible slice of results (a viewport). The selection row is
+--- highlighted and, because the viewport is exactly window-sized, the highlight
+--- can never land off-screen.
+local function render()
+  local n = #state.results
+  local vis = visible_count()
+  local view = {}
+  if n == 0 then
+    view = { '  (no matches)' }
+  else
+    local last = math.min(state.offset + vis - 1, n)
+    for i = state.offset, last do
+      view[#view + 1] = state.results[i]
+    end
+    -- Pad with empty rows so the window bottom edge stays stable.
+    for i = #view + 1, vis do
+      view[i] = ''
+    end
+  end
+  vim.api.nvim_buf_set_lines(state.buf, 2, -1, false, view)
+  vim.api.nvim_buf_clear_namespace(state.buf, NS, 2, -1)
+  if n > 0 then
+    local idx = state.cursor - state.offset
+    local row = 2 + idx
+    vim.api.nvim_buf_set_extmark(state.buf, NS, row, 0, {
+      end_row = row,
+      end_col = #state.results[state.cursor],
+      hl_group = 'PpSelection',
+    })
+  end
+end
+
+local function do_search()
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then
+    return
+  end
+  local query = current_query()
+  local mode = state.mode
+  if query == '' then
+    mode = 'substring' -- empty query lists everything
+  end
+  local results = search(query, mode, config.options.max_results)
+  if results == nil then
+    state.results = {}
+    vim.api.nvim_buf_set_lines(state.buf, 2, -1, false, { '  (search error)' })
+    vim.api.nvim_buf_clear_namespace(state.buf, NS, 2, -1)
+    return
+  end
+  state.results = results
+  clamp_view()
+  render()
+end
+
+-- Hoisted so the per-keystroke timer start reuses one closure instead of
+-- allocating a fresh one each time (FNEW would abort the JIT trace).
+local debounced_search = vim.schedule_wrap(do_search)
+
+local function schedule_search()
+  if not state.timer then
+    state.timer = vim.uv.new_timer()
+  end
+  state.timer:stop()
+  state.timer:start(config.options.debounce_ms, 0, debounced_search)
+end
+
+local function move_selection(delta)
+  local n = #state.results
+  if n == 0 then
+    return
+  end
+  state.cursor = ((state.cursor - 1 + delta + n) % n) + 1
+  local vis = visible_count()
+  if state.cursor < state.offset then
+    state.offset = state.cursor
+  elseif state.cursor > state.offset + vis - 1 then
+    state.offset = state.cursor - vis + 1
+  end
+  render()
+end
+
+local function cycle_mode()
+  state.mode = next_mode(state.mode)
+  vim.api.nvim_buf_set_lines(state.buf, 1, 2, false, { '[' .. state.mode .. ']' })
+  schedule_search()
+end
+
+local function accept()
+  local path = state.results[state.cursor]
+  local on_select = state.on_select
+  close_float()
+  if path then
+    on_select(path)
+  end
+end
+
+local function cancel()
+  close_float()
+end
+
+local function open_float(opts)
+  local width = math.min(math.floor(vim.o.columns * 0.6), 100)
+  local height = 14
+  local row = math.max(1, math.floor((vim.o.lines - height) / 2))
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local mode = opts.mode or config.options.default_mode
+  state.mode = MODES[mode] and mode or 'substring'
+  state.on_select = opts.on_select
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = 'minimal',
+    border = 'rounded',
+  })
+  state.buf, state.win = buf, win
+  state.prompt = opts.prompt or config.options.prompt
+
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+    state.prompt,
+    '[' .. state.mode .. ']',
+    '  (searching...)',
+  })
+
+  vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
+    buffer = buf,
+    callback = schedule_search,
+  })
+
+  local function imap(lhs, fn)
+    vim.keymap.set('i', lhs, fn, { buffer = buf, nowait = true })
+  end
+  local function nmap(lhs, fn)
+    vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true })
+  end
+  local actions = {
+    ['<CR>'] = accept,
+    ['<Esc>'] = cancel,
+    ['<C-c>'] = cancel,
+    ['<C-f>'] = cycle_mode,
+    ['<C-n>'] = function() move_selection(1) end,
+    ['<C-p>'] = function() move_selection(-1) end,
+    ['<Down>'] = function() move_selection(1) end,
+    ['<Up>'] = function() move_selection(-1) end,
+  }
+  for lhs, fn in pairs(actions) do
+    imap(lhs, fn)
+    nmap(lhs, fn)
+  end
+  nmap('j', function() move_selection(1) end)
+  nmap('k', function() move_selection(-1) end)
+  nmap('q', cancel)
+
+  -- `nvim_win_set_cursor` clamps to the last character; `startinsert!`
+  -- behaves like `a` (append after the cursor), so the caret lands just past
+  -- the prompt text and stays in insert mode. (Relying on `:normal A` would
+  -- exit insert mode again when the command finishes.)
+  vim.api.nvim_win_set_cursor(win, { 1, #state.prompt })
+  vim.cmd('startinsert!')
+
+  vim.schedule(do_search)
+end
+
+-- ---------------------------------------------------------------------------
+-- fzf-lua / custom picker (fallback path)
+-- ---------------------------------------------------------------------------
+
+local function fzf_lua_picker()
+  local ok, fzf = pcall(require, 'fzf-lua')
+  if not ok then
+    util.notify('pp.nvim: fzf-lua is required (or provide `opts.picker`)', vim.log.levels.ERROR)
+    return nil
+  end
+  return {
+    pick = function(items, opts)
+      fzf.fzf_exec(items, opts)
+    end,
+    files = function(opts)
+      fzf.files(opts)
+    end,
+  }
+end
+
+local function pick_custom(opts)
+  projects.list(function(list)
+    if #list == 0 then
+      util.notify('No projects found. Run `:PpIndex` to build the index.',
+        vim.log.levels.WARN)
+      return
+    end
+    local fzf = fzf_lua_picker()
+    if not fzf then return end
+    fzf.pick(list, {
+      prompt = opts.prompt,
+      winopts = { preview = { hidden = 'hidden' } },
+      actions = {
+        ['default'] = function(selected)
+          if not selected or selected[1] == '' then return end
+          opts.on_select(selected[1])
+        end,
+      },
+    })
+  end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
+
+--- The picker used for the post-selection `files` step (fzf-lua, or the
+--- configured custom picker). Returns nil if none is available.
+function M.get_files()
+  if config.options.picker then
+    return config.options.picker
+  end
+  return fzf_lua_picker()
+end
+
+--- Open the project picker. `opts`: `prompt`, `mode`, `on_select(path)`.
+function M.pick(opts)
+  if config.options.picker then
+    pick_custom(opts)
+    return
+  end
+  if load_lib() then
+    open_float(opts)
+    return
+  end
+  if not warned_fallback then
+    warned_fallback = true
+    util.notify(
+      'pp.nvim: FFI library not found; falling back to fzf-lua. '
+        .. 'Run `just nvim` in the pp repo to build it.',
+      vim.log.levels.WARN
+    )
+  end
+  pick_custom(opts)
+end
+
+-- Testing seam for headless tests (nvim without a UI does not dispatch
+-- keymaps, so the float's actions are exercised directly here). Not part of
+-- the public API.
+M._debug = {
+  state = state,
+  cycle_mode = cycle_mode,
+  move_selection = move_selection,
+  accept = accept,
+  cancel = cancel,
+  do_search = do_search,
+  render = render,
+  clamp_view = clamp_view,
+}
+
+return M
