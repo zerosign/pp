@@ -129,7 +129,17 @@ end
 -- ---------------------------------------------------------------------------
 
 local MODE_ORDER = { 'substring', 'fuzzy', 'prefix', 'subseq' }
+-- Human-readable mode names for the footer — no raw `[substring]` jargon.
+local MODE_LABELS = {
+  substring = 'contains',
+  prefix = 'starts with',
+  fuzzy = 'fuzzy',
+  subseq = 'in order',
+}
+-- Footer hints (rendered on the float border, outside the editable buffer).
+local HINTS = '↑↓/jk select · Enter open · Esc close · C-f mode'
 local NS = vim.api.nvim_create_namespace('pp-selection')
+local NS_PROMPT = vim.api.nvim_create_namespace('pp-prompt')
 
 -- Selection highlight. Linked to Visual so it follows the active colorscheme;
 -- a colorscheme that defines PpSelection itself takes precedence.
@@ -175,16 +185,15 @@ local function close_float()
 end
 
 local function current_query()
+  -- The prompt is inline virtual text, not part of the buffer, so the query
+  -- is simply the whole first line and can never contain the prompt.
   local line = vim.api.nvim_buf_get_lines(state.buf, 0, 1, false)[1] or ''
-  local prompt = state.prompt or config.options.prompt
-  if line:sub(1, #prompt) == prompt then
-    return line:sub(#prompt + 1)
-  end
   return line
 end
 
---- Number of result rows that fit in the float window (the top two rows are
---- the prompt and the mode indicator).
+--- Number of result rows that fit in the float window. The first buffer row
+--- is the query line; the mode hints live in the float footer (window border),
+--- so they don't consume a row.
 local function visible_count()
   if not state.win or not vim.api.nvim_win_is_valid(state.win) then
     return 12
@@ -205,7 +214,8 @@ local function clamp_view()
   state.offset = math.max(1, math.min(state.offset, n - vis + 1))
 end
 
---- Render only the visible slice of results (a viewport). The selection row is
+--- Render only the visible slice of results (a viewport), each prefixed with a
+--- selection marker (`>` for the selected row). The selection row is
 --- highlighted and, because the viewport is exactly window-sized, the highlight
 --- can never land off-screen.
 local function render()
@@ -217,21 +227,22 @@ local function render()
   else
     local last = math.min(state.offset + vis - 1, n)
     for i = state.offset, last do
-      view[#view + 1] = state.results[i]
-    end
-    -- Pad with empty rows so the window bottom edge stays stable.
-    for i = #view + 1, vis do
-      view[i] = ''
+      local marker = (i == state.cursor) and '> ' or '  '
+      view[#view + 1] = marker .. state.results[i]
     end
   end
-  vim.api.nvim_buf_set_lines(state.buf, 2, -1, false, view)
-  vim.api.nvim_buf_clear_namespace(state.buf, NS, 2, -1)
+  -- Pad with empty rows so the window bottom edge stays stable.
+  for i = #view + 1, vis do
+    view[i] = ''
+  end
+  vim.api.nvim_buf_set_lines(state.buf, 1, -1, false, view)
+  vim.api.nvim_buf_clear_namespace(state.buf, NS, 1, -1)
   if n > 0 then
     local idx = state.cursor - state.offset
-    local row = 2 + idx
+    local row = 1 + idx
     vim.api.nvim_buf_set_extmark(state.buf, NS, row, 0, {
       end_row = row,
-      end_col = #state.results[state.cursor],
+      end_col = #state.results[state.cursor] + 2,
       hl_group = 'PpSelection',
     })
   end
@@ -249,8 +260,8 @@ local function do_search()
   local results = search(query, mode, config.options.max_results)
   if results == nil then
     state.results = {}
-    vim.api.nvim_buf_set_lines(state.buf, 2, -1, false, { '  (search error)' })
-    vim.api.nvim_buf_clear_namespace(state.buf, NS, 2, -1)
+    vim.api.nvim_buf_set_lines(state.buf, 1, -1, false, { '  (search error)' })
+    vim.api.nvim_buf_clear_namespace(state.buf, NS, 1, -1)
     return
   end
   state.results = results
@@ -285,9 +296,19 @@ local function move_selection(delta)
   render()
 end
 
+--- Footer text: key hints, plus the current match mode (in plain words) when
+--- it is not the configured default — so the default UI stays clean.
+local function footer_text()
+  local mode = state.mode
+  if mode == config.options.default_mode then
+    return HINTS
+  end
+  return 'match: ' .. (MODE_LABELS[mode] or mode) .. ' · ' .. HINTS
+end
+
 local function cycle_mode()
   state.mode = next_mode(state.mode)
-  vim.api.nvim_buf_set_lines(state.buf, 1, 2, false, { '[' .. state.mode .. ']' })
+  vim.api.nvim_win_set_config(state.win, { footer = footer_text() })
   schedule_search()
 end
 
@@ -313,6 +334,7 @@ local function open_float(opts)
   local mode = opts.mode or config.options.default_mode
   state.mode = MODES[mode] and mode or 'substring'
   state.on_select = opts.on_select
+  state.prompt = opts.prompt or config.options.prompt
 
   local buf = vim.api.nvim_create_buf(false, true)
   local win = vim.api.nvim_open_win(buf, true, {
@@ -323,14 +345,18 @@ local function open_float(opts)
     col = col,
     style = 'minimal',
     border = 'rounded',
+    footer = footer_text(),
+    footer_pos = 'left',
   })
   state.buf, state.win = buf, win
-  state.prompt = opts.prompt or config.options.prompt
 
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-    state.prompt,
-    '[' .. state.mode .. ']',
-    '  (searching...)',
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
+
+  -- The prompt is inline virtual text: it renders ahead of the query but is
+  -- not part of the buffer, so it can never be deleted or edited.
+  vim.api.nvim_buf_set_extmark(buf, NS_PROMPT, 0, 0, {
+    virt_text = { { state.prompt, 'Comment' } },
+    virt_text_pos = 'inline',
   })
 
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
@@ -363,10 +389,9 @@ local function open_float(opts)
   nmap('q', cancel)
 
   -- `nvim_win_set_cursor` clamps to the last character; `startinsert!`
-  -- behaves like `a` (append after the cursor), so the caret lands just past
-  -- the prompt text and stays in insert mode. (Relying on `:normal A` would
-  -- exit insert mode again when the command finishes.)
-  vim.api.nvim_win_set_cursor(win, { 1, #state.prompt })
+  -- behaves like `a` (append after the cursor). The cursor sits at the start
+  -- of the query line (column 0) which renders just past the virtual prompt.
+  vim.api.nvim_win_set_cursor(win, { 1, 0 })
   vim.cmd('startinsert!')
 
   vim.schedule(do_search)
