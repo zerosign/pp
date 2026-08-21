@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-pub use pp::{cache_paths, get_cache_path, get_config_path, load_config, Config};
+pub use pp::{Config, cache_paths, get_cache_path, get_config_path, load_config};
 
 /// Result type re-exported for convenience.
 pub type Result<T> = pp::Result<T>;
@@ -95,6 +95,7 @@ pub mod ffi {
 
     fn cache() -> &'static RwLock<Cache> {
         static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();
+
         CACHE.get_or_init(|| {
             RwLock::new(Cache {
                 repos: Vec::new(),
@@ -174,10 +175,12 @@ pub mod ffi {
         if query.is_null() {
             return std::ptr::null_mut();
         }
+
         let result = (|| -> Result<String> {
             let query = unsafe { CStr::from_ptr(query) }
                 .to_str()
                 .map_err(|err| format!("invalid UTF-8 query: {err}"))?;
+
             let matches = pp::search_matches(
                 &repos()?,
                 query,
@@ -185,6 +188,7 @@ pub mod ffi {
                 distance,
                 usize::try_from(limit).ok().filter(|n| *n > 0),
             );
+
             Ok(matches.join("\n"))
         })();
 
@@ -204,6 +208,7 @@ pub mod ffi {
         if ptr.is_null() {
             return;
         }
+
         unsafe { drop(CString::from_raw(ptr)) };
     }
 

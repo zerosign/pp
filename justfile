@@ -41,6 +41,11 @@ build-nvim-portable:
 clippy:
     cargo clippy --workspace --all-targets -- -W clippy::pedantic
 
+# Run sandboxed Lua/nvim test suites (fake $HOME + repos in tests/sandbox;
+# never touches your real nvim config, state, or repository index)
+test-lua:
+    ./tests/run.sh
+
 # Build and install binary + shell integrations
 install: build install-bin install-fish install-completions
     @echo "✓ pp installed successfully"

@@ -229,6 +229,7 @@ fn to_sorted_strings(repos: Vec<PathBuf>) -> Vec<String> {
         .into_iter()
         .filter_map(|repo| repo.to_str().map(str::to_string))
         .collect();
+
     strings.sort();
     strings.dedup();
     strings

@@ -34,19 +34,21 @@ local MODES = {
 }
 
 local function resolve_lib_path()
-  local configured = config.options.lib_path
-  if configured and vim.fn.filereadable(configured) == 1 then
-    return configured
-  end
   -- Default: <plugin>/build/libpp_nvim.so — three dirnames up from picker.lua.
   local source = debug.getinfo(1, 'S').source or ''
   local file = source:sub(1, 1) == '@' and source:sub(2) or source
-  local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(file)))
-  local base = vim.fs.joinpath(root, 'build')
-  for _, name in ipairs({ 'libpp_nvim.so', 'libpp_nvim.dylib', 'libpp_nvim.dll' }) do
-    local candidate = vim.fs.joinpath(base, name)
-    if vim.fn.filereadable(candidate) == 1 then
-      return candidate
+  local base = vim.fs.joinpath(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(file))), 'build')
+  -- First readable candidate wins; a nil configured path is simply skipped.
+  local candidates = {
+    config.options.lib_path,
+    vim.fs.joinpath(base, 'libpp_nvim.so'),
+    vim.fs.joinpath(base, 'libpp_nvim.dylib'),
+    vim.fs.joinpath(base, 'libpp_nvim.dll'),
+  }
+  for i = 1, #candidates do
+    local path = candidates[i]
+    if path and vim.fn.filereadable(path) == 1 then
+      return path
     end
   end
   return nil
@@ -56,6 +58,7 @@ local function load_lib()
   if lib then
     return true
   end
+
   if not ffi then
     local ok, result = pcall(require, 'ffi')
     if not ok then
@@ -63,15 +66,19 @@ local function load_lib()
     end
     ffi = result
   end
+
   local path = resolve_lib_path()
+  
   if not path then
     return false
   end
-  ffi.cdef[[
+
+  ffi.cdef [[
     void *pp_search(const char *query, int mode, unsigned int distance, int limit);
     void pp_string_free(void *ptr);
     int pp_refresh(void);
   ]]
+
   local ok, handle = pcall(ffi.load, path)
   if not ok then
     util.notify('pp.nvim: failed to load ' .. path .. ': ' .. tostring(handle),
@@ -112,16 +119,14 @@ local function search(query, mode, limit)
     return nil
   end
   local ptr = lib.pp_search(query, MODES[mode] or 0, config.options.fuzzy_distance, limit or -1)
-  local ok, text = pcall(ffi.string, ptr)
-  -- Release the FFI result either way; only a null pointer (library error or
-  -- nil) skips the free.
-  if ptr ~= nil then
-    pcall(lib.pp_string_free, ptr)
-  end
-  if not ok then
+  -- A NULL pointer return arrives as Lua nil (library error), so one guard
+  -- covers both cases; ffi.string and the free cannot throw on a valid ptr.
+  if ptr == nil then
     return nil
   end
-  return split_lines(text or '', config.options.max_results)
+  local text = ffi.string(ptr)
+  lib.pp_string_free(ptr)
+  return split_lines(text, config.options.max_results)
 end
 
 -- ---------------------------------------------------------------------------
@@ -219,16 +224,18 @@ end
 --- highlighted and, because the viewport is exactly window-sized, the highlight
 --- can never land off-screen.
 local function render()
-  local n = #state.results
+  local results = state.results
+  local n = #results
   local vis = visible_count()
-  local view = {}
+  -- Pre-allocated so rendering never grows the table dynamically.
+  local view = table_new(vis, 0)
   if n == 0 then
-    view = { '  (no matches)' }
+    view[1] = '  (no matches)'
   else
-    local last = math.min(state.offset + vis - 1, n)
-    for i = state.offset, last do
-      local marker = (i == state.cursor) and '> ' or '  '
-      view[#view + 1] = marker .. state.results[i]
+    local cursor, offset = state.cursor, state.offset
+    local last = math.min(offset + vis - 1, n)
+    for i = offset, last do
+      view[i - offset + 1] = ((i == cursor) and '> ' or '  ') .. results[i]
     end
   end
   -- Pad with empty rows so the window bottom edge stays stable.
@@ -238,11 +245,10 @@ local function render()
   vim.api.nvim_buf_set_lines(state.buf, 1, -1, false, view)
   vim.api.nvim_buf_clear_namespace(state.buf, NS, 1, -1)
   if n > 0 then
-    local idx = state.cursor - state.offset
-    local row = 1 + idx
+    local row = 1 + (state.cursor - state.offset)
     vim.api.nvim_buf_set_extmark(state.buf, NS, row, 0, {
       end_row = row,
-      end_col = #state.results[state.cursor] + 2,
+      end_col = #results[state.cursor] + 2,
       hl_group = 'PpSelection',
     })
   end
@@ -466,7 +472,7 @@ function M.pick(opts)
     warned_fallback = true
     util.notify(
       'pp.nvim: FFI library not found; falling back to fzf-lua. '
-        .. 'Run `just nvim` in the pp repo to build it.',
+      .. 'Run `just nvim` in the pp repo to build it.',
       vim.log.levels.WARN
     )
   end
