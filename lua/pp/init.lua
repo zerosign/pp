@@ -37,7 +37,9 @@ M.clear = projects.clear
 local function open_files(path)
   local name = vim.fs.basename(path)
   local fzf = picker.get_files()
-  if not fzf then return end
+  if not fzf then
+    return
+  end
   fzf.files({
     cwd = path,
     prompt = string.format(config.options.files_prompt, name),
@@ -57,8 +59,12 @@ end
 
 --- The cdylib name cargo produces for the host platform.
 local function cdylib_name()
-  if jit.os == 'OSX' then return 'libpp_nvim.dylib' end
-  if jit.os == 'Windows' then return 'pp_nvim.dll' end
+  if jit.os == 'OSX' then
+    return 'libpp_nvim.dylib'
+  end
+  if jit.os == 'Windows' then
+    return 'pp_nvim.dll'
+  end
   return 'libpp_nvim.so'
 end
 
@@ -95,18 +101,25 @@ function M.build_native()
   end
   local build_dir = vim.fs.joinpath(root, 'build')
   vim.fn.mkdir(build_dir, 'p')
-  local ok_copy, copied = pcall(vim.uv.fs_copyfile,
+  local ok_copy, copied = pcall(
+    vim.uv.fs_copyfile,
     vim.fs.joinpath(root, 'target', 'release', name),
-    vim.fs.joinpath(build_dir, name))
+    vim.fs.joinpath(build_dir, name)
+  )
   if not ok_copy or not copied then
-    util.notify('pp.nvim: build OK but could not copy ' .. name .. ' into build/', vim.log.levels.ERROR)
+    util.notify(
+      'pp.nvim: build OK but could not copy ' .. name .. ' into build/',
+      vim.log.levels.ERROR
+    )
     return
   end
   util.notify('pp.nvim: native lib installed (build/' .. name .. ')')
 end
 
 local function open_in_tab(path)
-  if not path or path == '' then return end
+  if not path or path == '' then
+    return
+  end
   -- Schedule so any picker window closes cleanly first.
   vim.schedule(function()
     vim.cmd('tabnew')
@@ -139,7 +152,9 @@ function M.switch_project()
   picker.pick({
     prompt = 'Switch Project> ',
     on_select = function(path)
-      if not path or path == '' then return end
+      if not path or path == '' then
+        return
+      end
       vim.api.nvim_set_current_dir(path)
       open_files(path)
     end,

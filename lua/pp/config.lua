@@ -6,18 +6,18 @@
 local M = {}
 
 M.defaults = {
-  binary = 'pp',                -- binary name (must be on PATH) or absolute path
+  binary = 'pp', -- binary name (must be on PATH) or absolute path
   prompt = 'Workspace Project > ',
-  files_prompt = '%s Files> ',  -- %s is substituted with the project basename
-  picker = nil,                 -- custom picker: { pick = fn(items, opts), files = fn(opts) }
-                                -- (nil -> FFI float picker, fzf-lua fallback)
+  files_prompt = '%s Files> ', -- %s is substituted with the project basename
+  picker = nil, -- custom picker: { pick = fn(items, opts), files = fn(opts) }
+  -- (nil -> FFI float picker, fzf-lua fallback)
 
   -- FFI float picker options
-  lib_path = nil,               -- nil -> <plugin>/build/libpp_nvim.so
-  default_mode = 'substring',   -- substring | fuzzy | prefix | subseq (see `:PpSearch`)
-  fuzzy_distance = 2,           -- max edits for fuzzy mode
-  max_results = 200,            -- results rendered per keystroke
-  debounce_ms = 25,             -- keystroke debounce before searching
+  lib_path = nil, -- nil -> <plugin>/build/libpp_nvim.so
+  default_mode = 'substring', -- substring | fuzzy | prefix | subseq (see `:PpSearch`)
+  fuzzy_distance = 2, -- max edits for fuzzy mode
+  max_results = 200, -- results rendered per keystroke
+  debounce_ms = 25, -- keystroke debounce before searching
 }
 
 --- Effective config after setup() has run.

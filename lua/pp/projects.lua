@@ -24,8 +24,10 @@ local function run(args, on_success)
       if err == '' then
         err = 'is `pp` on your PATH? Try `just install` in ~/Repositories/projects/pp.'
       end
-      notify(string.format('pp %s failed (%d): %s', table.concat(args, ' '), obj.code, err),
-        vim.log.levels.ERROR)
+      notify(
+        string.format('pp %s failed (%d): %s', table.concat(args, ' '), obj.code, err),
+        vim.log.levels.ERROR
+      )
       return
     end
     if on_success then
@@ -35,7 +37,9 @@ local function run(args, on_success)
 end
 
 local function lines(stdout)
-  return vim.tbl_filter(function(s) return s ~= '' end, vim.split(stdout or '', '\n'))
+  return vim.tbl_filter(function(s)
+    return s ~= ''
+  end, vim.split(stdout or '', '\n'))
 end
 
 --- Cached project list; calls `cb(list)`.
