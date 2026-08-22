@@ -39,11 +39,13 @@ local function resolve_lib_path()
   local file = source:sub(1, 1) == '@' and source:sub(2) or source
   local base = vim.fs.joinpath(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(file))), 'build')
   -- First readable candidate wins; a nil configured path is simply skipped.
+  -- The dll name must match what cargo emits for the cdylib (pp_nvim.dll,
+  -- no `lib` prefix) — the same name build_native() installs.
   local candidates = {
     config.options.lib_path,
     vim.fs.joinpath(base, 'libpp_nvim.so'),
     vim.fs.joinpath(base, 'libpp_nvim.dylib'),
-    vim.fs.joinpath(base, 'libpp_nvim.dll'),
+    vim.fs.joinpath(base, 'pp_nvim.dll'),
   }
   for i = 1, #candidates do
     local path = candidates[i]
@@ -68,21 +70,23 @@ local function load_lib()
   end
 
   local path = resolve_lib_path()
-  
+
   if not path then
     return false
   end
 
-  ffi.cdef [[
+  ffi.cdef([[
     void *pp_search(const char *query, int mode, unsigned int distance, int limit);
     void pp_string_free(void *ptr);
     int pp_refresh(void);
-  ]]
+  ]])
 
   local ok, handle = pcall(ffi.load, path)
   if not ok then
-    util.notify('pp.nvim: failed to load ' .. path .. ': ' .. tostring(handle),
-      vim.log.levels.ERROR)
+    util.notify(
+      'pp.nvim: failed to load ' .. path .. ': ' .. tostring(handle),
+      vim.log.levels.ERROR
+    )
     return false
   end
   lib = handle
@@ -143,6 +147,7 @@ local MODE_LABELS = {
 }
 -- Footer hints (rendered on the float border, outside the editable buffer).
 local HINTS = '↑↓/jk select · Enter open · Esc close · C-f mode'
+
 local NS = vim.api.nvim_create_namespace('pp-selection')
 local NS_PROMPT = vim.api.nvim_create_namespace('pp-prompt')
 
@@ -360,9 +365,12 @@ local function open_float(opts)
 
   -- The prompt is inline virtual text: it renders ahead of the query but is
   -- not part of the buffer, so it can never be deleted or edited.
+  -- right_gravity = false keeps it anchored at col 0: with the default (true)
+  -- every keystroke pushes the extmark right and the prompt trails the query.
   vim.api.nvim_buf_set_extmark(buf, NS_PROMPT, 0, 0, {
     virt_text = { { state.prompt, 'Comment' } },
     virt_text_pos = 'inline',
+    right_gravity = false,
   })
 
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
@@ -381,17 +389,35 @@ local function open_float(opts)
     ['<Esc>'] = cancel,
     ['<C-c>'] = cancel,
     ['<C-f>'] = cycle_mode,
-    ['<C-n>'] = function() move_selection(1) end,
-    ['<C-p>'] = function() move_selection(-1) end,
-    ['<Down>'] = function() move_selection(1) end,
-    ['<Up>'] = function() move_selection(-1) end,
+    ['<C-n>'] = function()
+      move_selection(1)
+    end,
+    ['<C-p>'] = function()
+      move_selection(-1)
+    end,
+    ['<Down>'] = function()
+      move_selection(1)
+    end,
+    ['<Up>'] = function()
+      move_selection(-1)
+    end,
   }
   for lhs, fn in pairs(actions) do
     imap(lhs, fn)
     nmap(lhs, fn)
   end
-  nmap('j', function() move_selection(1) end)
-  nmap('k', function() move_selection(-1) end)
+  -- The float is insert-only. Escaping to normal mode (<C-o>, <C-\><C-n>)
+  -- would allow line ops (dd, x, p...) to delete the query row, which pulls
+  -- result text up into the editable query line and corrupts the picker.
+  -- Swallow the escape hatches; the nmaps above stay as a safety net.
+  imap('<C-o>', function() end)
+  imap('<C-\\><C-n>', function() end)
+  nmap('j', function()
+    move_selection(1)
+  end)
+  nmap('k', function()
+    move_selection(-1)
+  end)
   nmap('q', cancel)
 
   -- `nvim_win_set_cursor` clamps to the last character; `startinsert!`
@@ -426,18 +452,21 @@ end
 local function pick_custom(opts)
   projects.list(function(list)
     if #list == 0 then
-      util.notify('No projects found. Run `:PpIndex` to build the index.',
-        vim.log.levels.WARN)
+      util.notify('No projects found. Run `:PpIndex` to build the index.', vim.log.levels.WARN)
       return
     end
     local fzf = fzf_lua_picker()
-    if not fzf then return end
+    if not fzf then
+      return
+    end
     fzf.pick(list, {
       prompt = opts.prompt,
       winopts = { preview = { hidden = 'hidden' } },
       actions = {
         ['default'] = function(selected)
-          if not selected or selected[1] == '' then return end
+          if not selected or selected[1] == '' then
+            return
+          end
           opts.on_select(selected[1])
         end,
       },
@@ -472,7 +501,7 @@ function M.pick(opts)
     warned_fallback = true
     util.notify(
       'pp.nvim: FFI library not found; falling back to fzf-lua. '
-      .. 'Run `just nvim` in the pp repo to build it.',
+        .. 'Run `just nvim` in the pp repo to build it.',
       vim.log.levels.WARN
     )
   end
