@@ -48,6 +48,11 @@ pub struct Config {
     /// Rebuild the cache when it is older than this many days.
     #[serde(default = "default_index_ttl_days")]
     pub index_ttl_days: u64,
+    /// Follow symlinked directories while scanning. Off by default: an
+    /// outbound link can pull arbitrary trees into the scan, so indexing
+    /// repositories reached through symlinks is an explicit opt-in.
+    #[serde(default)]
+    pub follow_symlinks: bool,
 }
 
 fn default_max_depth() -> usize {
@@ -101,6 +106,7 @@ impl Default for Config {
             project_markers: default_project_markers(),
             max_depth: default_max_depth(),
             index_ttl_days: default_index_ttl_days(),
+            follow_symlinks: false,
         }
     }
 }
@@ -155,11 +161,28 @@ pub fn cache_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((cache_dir.clone(), cache_dir.join("index.fst")))
 }
 
+/// Expand `~` and anchor relative paths to `home`.
+///
+/// Relative roots must not silently depend on the working directory of
+/// whichever process happens to index (`pp index` in a shell vs `:PpIndex`
+/// inside nvim would otherwise build different indexes from one config), so
+/// they resolve against the home directory.
+fn expand_path_with(path: &str, home: &Path) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| (path == "~").then_some("")) {
+        return home.join(rest);
+    }
+    let candidate = Path::new(path);
+    if candidate.is_relative() {
+        return home.join(candidate);
+    }
+    candidate.to_path_buf()
+}
+
 fn expand_path(path: &str) -> PathBuf {
-    path.strip_prefix("~/")
-        .or_else(|| (path == "~").then_some(""))
-        .and_then(|rest| directories::UserDirs::new().map(|dirs| dirs.home_dir().join(rest)))
-        .unwrap_or_else(|| PathBuf::from(path))
+    match directories::UserDirs::new() {
+        Some(dirs) => expand_path_with(path, dirs.home_dir()),
+        None => PathBuf::from(path),
+    }
 }
 
 fn scan_directory(
@@ -168,6 +191,7 @@ fn scan_directory(
     project_markers: &[String],
     depth: usize,
     max_depth: usize,
+    follow_symlinks: bool,
 ) -> Vec<PathBuf> {
     if depth >= max_depth {
         return vec![];
@@ -193,11 +217,15 @@ fn scan_directory(
             has_marker = true;
             break;
         }
-        if entry
-            .file_type()
-            .is_ok_and(|file_type| file_type.is_dir())
-            && !ignored_dirs.iter().any(|ignored| ignored == &*name)
-        {
+        // entry.file_type() does not follow symlinks; fs::metadata does.
+        // Following is opt-in (Config::follow_symlinks) because an outbound
+        // link can pull arbitrary trees into the scan.
+        let is_dir = if follow_symlinks {
+            fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
+        } else {
+            entry.file_type().is_ok_and(|ft| ft.is_dir())
+        };
+        if is_dir && !ignored_dirs.iter().any(|ignored| ignored == &*name) {
             subdirs.push(entry.path());
         }
     }
@@ -208,7 +236,16 @@ fn scan_directory(
 
     subdirs
         .into_par_iter()
-        .flat_map(|entry| scan_directory(&entry, ignored_dirs, project_markers, depth + 1, max_depth))
+        .flat_map(|entry| {
+            scan_directory(
+                &entry,
+                ignored_dirs,
+                project_markers,
+                depth + 1,
+                max_depth,
+                follow_symlinks,
+            )
+        })
         .collect()
 }
 
@@ -220,7 +257,16 @@ pub fn scan_repos(config: &Config) -> Vec<PathBuf> {
         .iter()
         .map(|root| expand_path(root))
         .filter(|root| root.exists())
-        .flat_map(|root| scan_directory(&root, &config.ignored_dirs, &config.project_markers, 0, config.max_depth))
+        .flat_map(|root| {
+            scan_directory(
+                &root,
+                &config.ignored_dirs,
+                &config.project_markers,
+                0,
+                config.max_depth,
+                config.follow_symlinks,
+            )
+        })
         .collect()
 }
 
@@ -654,5 +700,77 @@ mod tests {
     fn empty_query_matches_everything_for_prefix() {
         let results = search_matches(&repos(), "", SearchMode::Prefix, 0, None);
         assert_eq!(results.len(), REPOS.len());
+    }
+
+    #[test]
+    fn expand_path_anchors_relative_roots_to_home() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            expand_path_with("~/Repos", home),
+            PathBuf::from("/home/u/Repos")
+        );
+        assert_eq!(expand_path_with("~", home), PathBuf::from("/home/u"));
+        // A relative root must not depend on the indexing process's cwd.
+        assert_eq!(expand_path_with("code", home), PathBuf::from("/home/u/code"));
+        assert_eq!(
+            expand_path_with("/abs/path", home),
+            PathBuf::from("/abs/path")
+        );
+    }
+
+    /// Symlink fixture: `real-repo` (has .git) plus `link-repo` pointing at it.
+    /// `tag` keeps parallel tests from sharing one temp dir.
+    fn symlink_fixture(tag: &str) -> (PathBuf, Config) {
+        let tmp =
+            std::env::temp_dir().join(format!("pp-scan-symlink-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let real = tmp.join("real-repo");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(".git"), "").unwrap();
+        // The user scenario: a repository reached through a symlinked
+        // directory inside a scanned root.
+        std::os::unix::fs::symlink(&real, tmp.join("link-repo")).unwrap();
+        (tmp, Config::default())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_skips_symlinks_by_default() {
+        let (tmp, config) = symlink_fixture("skip");
+        let mut found = scan_directory(
+            &tmp,
+            &config.ignored_dirs,
+            &config.project_markers,
+            0,
+            config.max_depth,
+            config.follow_symlinks,
+        );
+        found.sort();
+
+        let names: Vec<&str> = found.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert_eq!(names, vec!["real-repo"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_follows_symlinked_directories_when_enabled() {
+        let (tmp, mut config) = symlink_fixture("follow");
+        config.follow_symlinks = true;
+        let mut found = scan_directory(
+            &tmp,
+            &config.ignored_dirs,
+            &config.project_markers,
+            0,
+            config.max_depth,
+            config.follow_symlinks,
+        );
+        found.sort();
+
+        let names: Vec<&str> = found.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert_eq!(names, vec!["link-repo", "real-repo"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
