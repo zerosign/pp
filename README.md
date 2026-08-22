@@ -43,67 +43,60 @@ Configuration (`require('pp').setup(opts)`): `binary`, `prompt`, `files_prompt`,
 `picker`, `lib_path`, `default_mode`, `fuzzy_distance`, `max_results`,
 `debounce_ms`.
 
-## Installing in Neovim (LazyVim)
+## Installation
 
-Add a plugin spec — LazyVim auto-imports everything under
-`~/.config/nvim/lua/plugins/`:
+Requires a Rust toolchain (`cargo`) and [`just`](https://github.com/casey/just).
+
+### CLI
+
+```sh
+just install      # binary → ~/.local/bin/pp + fish wrapper + shell completions
+pp index          # build the repository index once
+```
+
+`just uninstall` removes everything again. Completions cover fish, bash and
+zsh; restart your shell (or `source ~/.config/fish/functions/pp.fish`) after
+installing.
+
+### Neovim plugin (lazy.nvim / LazyVim)
 
 ```lua
 -- ~/.config/nvim/lua/plugins/pp.lua
 return {
-  {
-    'zerosign/pp',
-    -- lazy.nvim runs `build` on install/update: compile the Rust cdylib for
-    -- THIS machine (-C target-cpu=native). Requires a Rust toolchain.
-    build = function()
-      require('pp').build_native()
-    end,
-    opts = {
-      -- optional; LazyVim calls require('pp').setup(opts) automatically
-      default_mode = 'fuzzy',
-    },
-    keys = {
-      { '<leader>fp', '<cmd>PpProject<CR>', desc = 'Open project (pp)' },
-      { '<leader>fs', '<cmd>PpSearch fuzzy<CR>', desc = 'Search projects (pp)' },
-    },
+  'zerosign/pp',
+  build = function() require('pp').build_native() end, -- compiles the FFI cdylib
+  opts = {},
+  keys = {
+    { '<leader>fp', '<cmd>PpProject<CR>', desc = 'Open project (pp)' },
+    { '<leader>fs', '<cmd>PpSearch fuzzy<CR>', desc = 'Search projects (pp)' },
   },
 }
 ```
 
-Notes:
-
-- **The build hook is the point of a per-machine install**: the picker searches
-  through `build/libpp_nvim.so`, and `build_native()` compiles it with
-  `-C target-cpu=native` so other people's machines get march=native even if
-  they have no cargo config of their own. If your global `~/.cargo/config.toml`
-  already tunes release builds (e.g. `target-cpu=znver4`), the flag is a
-  harmless no-op — your tuned build wins (profile flags are appended after).
-  `:PpBuild` rebuilds anytime.
-- `require('pp')` is loadable *before* the build completes, so the `build` hook
-  can call it.
-- The Rust **`pp` CLI** must be on `$PATH` for `:PpIndex`/`:PpClear` and the
-  fzf-lua fallback (`just install` in the repo installs it).
-- If the cdylib is missing, the picker falls back to fzf-lua with a one-time
-  notice.
-- Pick keys that don't clash with LazyVim's defaults (`<leader>fp` is its
-  Telescope "find project" binding, so you may want a different key).
+That's it. On install/update lazy.nvim runs the `build` hook, which compiles
+`libpp_nvim.so` for your machine (`-C target-cpu=native`, needs cargo). The
+`pp` CLI must be on `$PATH` (step above). If the cdylib is ever missing, the
+picker falls back to fzf-lua with a one-time notice; `:PpBuild` rebuilds it
+anytime. Pick keys that don't clash with your existing mappings (`<leader>fp`
+is Telescope's "find project" in stock LazyVim).
 
 ## Building & testing
 
 ```sh
 just nvim                 # build the FFI cdylib (native: -C target-cpu=native) → build/libpp_nvim.so
 just nvim-portable        # portable build (runs on any x86-64 CPU)
-just clippy               # cargo clippy --workspace --all-targets -- -W clippy::pedantic
-cargo test --workspace    # 10 tests (9 core + 1 FFI roundtrip)
+just clippy               # pedantic lints (enforced via workspace lints; plain `cargo clippy` is enough)
+cargo test --workspace    # 13 tests (12 core + 1 FFI roundtrip)
+just test-lua             # sandboxed headless picker + JIT-trace suites (fake $HOME, never touches your config)
 cargo +nightly miri test -p pp-nvim   # FFI test under Miri (no UB, no leaks)
 ```
 
 ## Verification status
 
-- `cargo clippy --workspace --all-targets -- -W clippy::pedantic` — clean, exit 0.
-- `cargo test --workspace` — 10/10 pass.
+- `cargo clippy --workspace --all-targets` — clean at clippy::pedantic (workspace lints), exit 0.
+- `cargo test --workspace` — 13/13 pass.
 - Miri (`-Zmiri-disable-isolation`) — clean on both crates.
-- Headless picker functional test (`tests/picker_test.lua`) — passes.
+- Sandboxed headless picker tests (`just test-lua`, `tests/`) — pass.
 - TUI tmux smoke test — picker opens, filtering ranks exact basename first,
   `<C-f>` mode cycle re-renders, `<CR>` accepts and opens the workspace.
 - LuaJIT trace audit (`jit.dump 'tb'`) — the per-keystroke path compiles to
