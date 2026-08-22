@@ -12,3 +12,6 @@ pp = { path = "../pp" }
 
 [dev-dependencies]
 fst = "0.4"
+
+[lints]
+workspace = true

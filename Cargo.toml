@@ -2,6 +2,9 @@
 resolver = "3"
 members = ["crates/pp", "crates/pp-cli", "crates/pp-nvim"]
 
+[workspace.lints.clippy]
+pedantic = "warn"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
