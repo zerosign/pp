@@ -327,6 +327,7 @@ local function accept()
   local path = state.results[state.cursor]
   local on_select = state.on_select
   close_float()
+
   if path then
     on_select(path)
   end
@@ -348,6 +349,7 @@ local function open_float(opts)
   state.prompt = opts.prompt or config.options.prompt
 
   local buf = vim.api.nvim_create_buf(false, true)
+
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
@@ -359,9 +361,19 @@ local function open_float(opts)
     footer = footer_text(),
     footer_pos = 'left',
   })
+
   state.buf, state.win = buf, win
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
+
+  -- Completion plugins (blink.cmp, nvim-cmp) would auto-open their popup over
+  -- the results while typing. Both expose per-buffer kill switches; the float
+  -- is current after nvim_open_win(enter=true), so cmp.setup.buffer applies.
+  vim.b[buf].completion = false -- blink.cmp
+  local ok_cmp, cmp = pcall(require, 'cmp')
+  if ok_cmp then
+    cmp.setup.buffer({ enabled = false }) -- nvim-cmp
+  end
 
   -- The prompt is inline virtual text: it renders ahead of the query but is
   -- not part of the buffer, so it can never be deleted or edited.
@@ -412,12 +424,15 @@ local function open_float(opts)
   -- Swallow the escape hatches; the nmaps above stay as a safety net.
   imap('<C-o>', function() end)
   imap('<C-\\><C-n>', function() end)
+
   nmap('j', function()
     move_selection(1)
   end)
+
   nmap('k', function()
     move_selection(-1)
   end)
+
   nmap('q', cancel)
 
   -- `nvim_win_set_cursor` clamps to the last character; `startinsert!`
