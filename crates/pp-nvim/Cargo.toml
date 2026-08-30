@@ -2,6 +2,7 @@
 name = "pp-nvim"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Exposes pp index & search functions for Neovim. UI is configured on the plugin side (plugin/init.lua)."
 
 [lib]

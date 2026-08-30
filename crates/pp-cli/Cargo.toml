@@ -2,6 +2,7 @@
 name = "pp-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Interactive pp picker (skim) + CLI subcommands"
 
 [[bin]]
