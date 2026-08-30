@@ -67,8 +67,9 @@ require('pp').setup({
 Requires Rust (`cargo`) and [`just`](https://github.com/casey/just).
 
 ```sh
-just install      # Installs binary to ~/.local/bin/pp + fish wrapper + completions
-pp index          # Build repository index once
+just install         # Installs release binary to ~/.local/bin/pp + fish wrapper + completions
+just install-static  # Installs static musl + mimalloc binary to ~/.local/bin/pp
+pp index             # Build repository index once
 ```
 
 To remove: `just uninstall`.
