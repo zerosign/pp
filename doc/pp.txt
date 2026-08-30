@@ -1,0 +1,105 @@
+*pp.txt*  Fast repository locator and Neovim floating picker
+
+==============================================================================
+CONTENTS                                                         *pp-contents*
+
+    1. Introduction ........................................ |pp-introduction|
+    2. Commands ............................................ |pp-commands|
+    3. Functions ........................................... |pp-functions|
+    4. Configuration ....................................... |pp-configuration|
+    5. Native FFI Build .................................... |pp-ffi|
+
+==============================================================================
+1. Introduction                                              *pp-introduction*
+
+pp.nvim is a Neovim plugin for instantly switching project workspaces. It is
+powered by `pp`, a fast repository locator written in Rust that scans your
+roots (`~/Repositories` by default), indexes git and project markers into an
+fst set, and provides per-keystroke fuzzy filtering.
+
+Search executes inside a compiled Rust cdylib (`libpp_nvim.so`) via LuaJIT
+FFI, rendering floating picker matches with zero latency. If the shared library
+is missing, it automatically falls back to `fzf-lua`.
+
+==============================================================================
+2. Commands                                                      *pp-commands*
+
+*:PpProject*
+    Pick a project workspace, open it in a new tab, change directory using
+    `:tcd`, and open its file picker.
+
+*:PpSwitch*
+    Pick a project workspace and change directory (`cwd`) for the current window.
+
+*:PpSearch* [{mode}]
+    Open the floating project search picker. Optional {mode} parameter:
+    - `substring` (default): Case-insensitive substring matching
+    - `fuzzy`: Levenshtein edit-distance matching
+    - `prefix`: Matching path basenames by prefix
+    - `subseq`: Subsequence matching across full path
+
+*:PpIndex*
+    Asynchronously rebuild the repository index.
+
+*:PpClear*
+    Clear the cached repository index.
+
+*:PpBuild*
+    Build and install the native FFI shared library (`libpp_nvim.so`) tuned
+    specifically for your CPU (`-C target-cpu=native`). Requires `cargo`.
+
+==============================================================================
+3. Functions                                                    *pp-functions*
+
+pp.setup({opts})                                                *pp.setup()*
+    Configure pp.nvim options. See |pp-configuration| for defaults.
+
+pp.switch_project_in_new_tab()                       *pp.switch_project_in_new_tab()*
+    Lua API equivalent of `:PpProject`.
+
+pp.switch_project()                                     *pp.switch_project()*
+    Lua API equivalent of `:PpSwitch`.
+
+pp.search({mode})                                               *pp.search()*
+    Lua API equivalent of `:PpSearch [{mode}]`.
+
+pp.reindex()                                                    *pp.reindex()*
+    Lua API equivalent of `:PpIndex`.
+
+pp.clear()                                                       *pp.clear()*
+    Lua API equivalent of `:PpClear`.
+
+pp.build_native()                                         *pp.build_native()*
+    Lua API equivalent of `:PpBuild`. Suitable for `lazy.nvim` build hooks:
+>lua
+    { 'zerosign/pp', build = function() require('pp').build_native() end }
+<
+
+==============================================================================
+4. Configuration                                            *pp-configuration*
+
+Pass a table to `require('pp').setup({opts})`:
+
+Field                   Default                 Description ~
+`binary`                `"pp"`                  Path or name of `pp` CLI binary
+`prompt`                `"Workspace Project > "` Prompt string for workspace picker
+`files_prompt`          `"%s Files> "`          Prompt string for files picker
+`default_mode`          `"substring"`           Default match mode (`substring|fuzzy|prefix|subseq`)
+`fuzzy_distance`        `2`                     Max Levenshtein edit distance for fuzzy mode
+`max_results`           `200`                   Max results rendered per keystroke
+`debounce_ms`           `25`                    Search debounce delay (ms)
+`lib_path`              `nil`                   Custom path to `libpp_nvim.so` (nil auto-detects)
+
+==============================================================================
+5. Native FFI Build                                                 *pp-ffi*
+
+`pp.nvim` achieves instant search UI responsiveness by executing fuzzy path
+matching directly in Rust via LuaJIT FFI.
+
+Building the shared library:
+    - Run `:PpBuild` inside Neovim, or `just build-nvim-native` in terminal.
+    - Uses `-C target-cpu=native` for maximum performance on your machine.
+    - If `libpp_nvim.so` is missing, `fzf-lua` is used as a transparent fallback.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:

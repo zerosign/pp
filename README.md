@@ -1,14 +1,11 @@
 # pp
 
-A fast repository locator with a Rust core and a Neovim float picker.
+A fast, lightweight repository locator and project switcher with a Rust core and a Neovim floating picker.
 
-Two pieces:
+## Architecture
 
-- **pp CLI** -- scans configured roots for repositories, keeps an `fst`-backed
-  cache, and exposes `list`, `search`, `index`, `clear`.
-- **pp.nvim** -- `:PpProject` / `:PpSwitch` / `:PpSearch` open a floating picker
-  whose per-keystroke search runs in Rust through a LuaJIT FFI cdylib
-  (`libpp_nvim.so`), falling back to fzf-lua when the library is missing.
+- **pp CLI**: Scans configured roots for git/project repositories, maintains an `fst`-backed cache, and exposes fast `index`, `list`, `search`, and `clear` commands.
+- **pp.nvim**: Neovim plugin providing `:PpProject`, `:PpSwitch`, and `:PpSearch`. Runs per-keystroke fuzzy matching directly in Rust via a LuaJIT FFI cdylib (`libpp_nvim.so`) with automatic `fzf-lua` fallback.
 
 ```
 lua/pp/picker.lua ── ffi.load ──▶ build/libpp_nvim.so ──▶ crates/pp-nvim ──▶ crates/pp
@@ -16,47 +13,67 @@ lua/pp/picker.lua ── ffi.load ──▶ build/libpp_nvim.so ──▶ crates
 lua/pp/projects.lua ── vim.system ──▶ pp CLI binary (data layer)
 ```
 
-## CLI
+---
 
-```
-pp index        Rebuild the repository index
-pp list         Print repositories (--no-cache for a live scan)
-pp search <q>   Search (--mode substring|prefix|fuzzy|subseq, --distance, --limit)
-pp clear        Clear the index
-pp generate <sh> Shell completions (fish, bash, zsh)
-pp             Interactive picker (skim) on stderr, selection on stdout
-```
+## CLI Usage
 
-## Neovim plugin
-
-```
-:PpProject   Pick a project, open it in a new tab, tcd into it, open its files
-:PpSwitch    Pick a project and switch the current window's cwd
-:PpSearch    Search projects (optional mode: substring|fuzzy|prefix|subseq)
-:PpIndex     Rebuild the index
-:PpClear     Clear the index
-:PpBuild     Build the FFI cdylib with -C target-cpu=native
+```sh
+pp index         # Rebuild the repository index
+pp list          # Print indexed repositories (--no-cache for a live scan)
+pp search <q>    # Fast CLI search (--mode substring|prefix|fuzzy|subseq, --limit N)
+pp clear         # Clear the index cache
+pp generate <sh> # Generate shell completion scripts (fish, bash, zsh)
+pp               # Default: print list (pipe to skim/fzf in shell wrappers)
 ```
 
-Configuration (`require('pp').setup(opts)`): `binary`, `prompt`, `files_prompt`,
-`picker`, `lib_path`, `default_mode`, `fuzzy_distance`, `max_results`,
-`debounce_ms`.
+---
+
+## Neovim Plugin
+
+### Commands
+
+| Command | Description |
+| :--- | :--- |
+| `:PpProject` | Pick a project, open a new tab, `tcd` into it, and open its files picker |
+| `:PpSwitch` | Pick a project and switch the current window's `cwd` |
+| `:PpSearch [mode]` | Search projects using `substring`, `fuzzy`, `prefix`, or `subseq` mode |
+| `:PpIndex` | Rebuild the repository index asynchronously |
+| `:PpClear` | Clear the index cache |
+| `:PpBuild` | Rebuild the native FFI cdylib with `-C target-cpu=native` |
+
+### Configuration
+
+Configure via `require('pp').setup(opts)`:
+
+```lua
+require('pp').setup({
+  binary = 'pp',                  -- Path or binary name for pp CLI on $PATH
+  prompt = 'Workspace Project > ', -- Floating picker prompt
+  files_prompt = '%s Files> ',     -- Post-selection files picker prompt (%s = project name)
+  default_mode = 'substring',     -- Default match mode: substring | fuzzy | prefix | subseq
+  fuzzy_distance = 2,             -- Max Levenshtein edit distance for fuzzy mode
+  max_results = 200,              -- Max search results rendered per keystroke
+  debounce_ms = 25,               -- Keystroke debounce delay (ms)
+  lib_path = nil,                 -- Custom path to libpp_nvim.so (nil auto-detects)
+})
+```
+
+---
 
 ## Installation
 
-Requires a Rust toolchain (`cargo`) and [`just`](https://github.com/casey/just).
+### 1. CLI Installation
 
-### CLI
+Requires Rust (`cargo`) and [`just`](https://github.com/casey/just).
 
 ```sh
-just install      # binary to ~/.local/bin/pp + fish wrapper + shell completions
-pp index          # build the repository index once
+just install      # Installs binary to ~/.local/bin/pp + fish wrapper + completions
+pp index          # Build repository index once
 ```
 
-`just uninstall` removes everything again. Completions cover fish, bash and
-zsh; restart your shell after installing.
+To remove: `just uninstall`.
 
-### Neovim plugin
+### 2. Neovim Plugin Installation (`lazy.nvim`)
 
 ```lua
 -- ~/.config/nvim/lua/plugins/pp.lua
@@ -65,41 +82,31 @@ return {
   build = function() require('pp').build_native() end,
   opts = {},
   keys = {
-    { '<leader>fp', '<cmd>PpProject<CR>', desc = 'Open project (pp)' },
+    { '<leader>fp', '<cmd>PpProject<CR>', desc = 'Find project (pp)' },
     { '<leader>fs', '<cmd>PpSearch fuzzy<CR>', desc = 'Search projects (pp)' },
   },
 }
 ```
 
-On install/update lazy.nvim runs the `build` hook, which compiles
-`libpp_nvim.so` for your machine (`-C target-cpu=native`, needs cargo). The
-`pp` CLI must be on `$PATH`. If the cdylib is missing, the picker falls back
-to fzf-lua; `:PpBuild` rebuilds it anytime.
+On installation or update, `lazy.nvim` executes `build_native()` to compile `libpp_nvim.so` tuned specifically for your CPU (`-C target-cpu=native`). If `cargo` is unavailable or the library is missing, `pp.nvim` automatically falls back to `fzf-lua`.
 
-## Building & testing
+---
+
+## Building & Testing
 
 ```sh
-just build-nvim-native    # FFI cdylib (native) -> build/libpp_nvim.so
-just nvim-portable        # FFI cdylib (portable, any x86-64)
-just clippy               # pedantic lints (workspace lints; cargo clippy suffices)
-cargo test --workspace    # 13 tests (12 core + 1 FFI roundtrip)
-just test-lua             # sandboxed headless picker + JIT-trace suites
-cargo +nightly miri test -p pp-nvim   # FFI test under Miri
+just build-nvim-native    # Build FFI cdylib (native) -> build/libpp_nvim.so
+just nvim-portable        # Build FFI cdylib (portable x86-64)
+just clippy               # Run pedantic clippy lints
+cargo test --workspace    # Run all Rust unit and integration tests (13 tests)
+just test-lua             # Run sandboxed Lua tests and LuaJIT trace audits
 ```
 
-## How it works
+---
 
-The index is an immutable `fst::Set` of absolute paths under configured roots.
-Search loads the set into memory and ranks results per keystroke: exact basename
-matches first, then prefix, substring, and subsequence. All matching (fuzzy edit
-distance, subsequence) runs in the Rust cdylib; Lua only renders the returned
-paths.
+## How It Works
 
-The FFI layer caches the repo list and reloads when `index.fst` changes on
-disk, so a reindex from another process shows up on the next keystroke. The
-cdylib is built per machine with `-C target-cpu=native` by default -- the lazy
-build hook and `just build-nvim-native` both do this automatically.
-
-The native float picker has no dependencies beyond Neovim's LuaJIT runtime. If
-the cdylib is missing or fails to load, pp.nvim falls back to fzf-lua for both
-project selection and the post-selection files picker.
+- **Indexing**: `pp` maintains an immutable `fst::Set` of absolute paths under configured root directories (`~/Repositories` by default, configurable in `~/.config/pp/config.toml`).
+- **Search & Ranking**: Matches are ranked per keystroke: exact basename matches first, followed by prefix, substring, and subsequence matches.
+- **FFI Performance**: The Neovim floating UI passes queries to `libpp_nvim.so` via LuaJIT FFI. Matching runs entirely in compiled C/Rust code; Lua only renders the resulting lines to the buffer.
+- **Automatic Cache Invalidation**: The FFI layer monitors `index.fst` modification timestamps on disk and reloads instantly when reindexed by another process.
