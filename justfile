@@ -18,10 +18,6 @@ build:
 build-static:
     cargo build --release --target x86_64-unknown-linux-musl -p pp-cli
 
-# Build static binary recompiling core, alloc, std from source (nightly)
-build-std:
-    RUSTFLAGS="-C panic=abort -C link-arg=-s" cargo +nightly build --release --target x86_64-unknown-linux-musl -Z build-std=core,alloc,std -p pp-cli
-
 # Build the FFI cdylib for THIS machine (-C target-cpu=native).
 # For a portable build (any x86-64) use `just nvim-portable`.
 build-nvim-native:
