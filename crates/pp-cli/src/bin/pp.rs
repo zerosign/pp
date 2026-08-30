@@ -70,6 +70,7 @@ impl From<SearchModeArg> for pp::SearchMode {
 
 /// The interactive fuzzy picker (skim). Renders on stderr so it composes with
 /// command substitution; the accepted selection is printed on stdout.
+#[cfg(feature = "skim")]
 fn pick_repo(repos: Vec<String>) -> Option<String> {
     use skim::prelude::*;
 
@@ -81,7 +82,7 @@ fn pick_repo(repos: Vec<String>) -> Option<String> {
         .ok()?;
 
     let output = Skim::run_items(options, repos).ok()?;
-    
+
     if output.is_abort {
         return None;
     }
@@ -90,6 +91,12 @@ fn pick_repo(repos: Vec<String>) -> Option<String> {
         .selected_items
         .first()
         .map(|item| item.item.output().to_string())
+}
+
+#[cfg(not(feature = "skim"))]
+fn pick_repo(_repos: Vec<String>) -> Option<String> {
+    eprintln!("Interactive skim selector is not enabled in this build. Pipe `pp list` to `sk` or `fzf`.");
+    None
 }
 
 fn print_lines<'a>(lines: impl Iterator<Item = &'a str>) -> io::Result<()> {

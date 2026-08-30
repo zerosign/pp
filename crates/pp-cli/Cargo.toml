@@ -12,7 +12,11 @@ path = "src/bin/pp.rs"
 pp = { path = "../pp" }
 clap.workspace = true
 clap_complete.workspace = true
-skim.workspace = true
+skim = { workspace = true, optional = true }
+
+[features]
+default = ["skim"]
+skim = ["dep:skim"]
 
 [lints]
 workspace = true
