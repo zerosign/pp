@@ -68,35 +68,18 @@ impl From<SearchModeArg> for pp::SearchMode {
     }
 }
 
-/// The interactive fuzzy picker (skim). Renders on stderr so it composes with
-/// command substitution; the accepted selection is printed on stdout.
-#[cfg(feature = "skim")]
-fn pick_repo(repos: Vec<String>) -> Option<String> {
-    use skim::prelude::*;
+/// Interactive fuzzy repository selector (`dialoguer`).
+fn pick_repo(repos: &[String]) -> Option<String> {
+    use dialoguer::{theme::ColorfulTheme, FuzzySelect};
 
-    let options = SkimOptionsBuilder::default()
-        .height("60%")
-        .multi(false)
-        .prompt("repo> ")
-        .build()
-        .ok()?;
+    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("repo")
+        .items(repos)
+        .default(0)
+        .interact_opt()
+        .ok()??;
 
-    let output = Skim::run_items(options, repos).ok()?;
-
-    if output.is_abort {
-        return None;
-    }
-
-    output
-        .selected_items
-        .first()
-        .map(|item| item.item.output().to_string())
-}
-
-#[cfg(not(feature = "skim"))]
-fn pick_repo(_repos: Vec<String>) -> Option<String> {
-    eprintln!("Interactive skim selector is not enabled in this build. Pipe `pp list` to `sk` or `fzf`.");
-    None
+    repos.get(selection).cloned()
 }
 
 fn print_lines<'a>(lines: impl Iterator<Item = &'a str>) -> io::Result<()> {
@@ -171,7 +154,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            if let Some(selected) = pick_repo(repos) {
+            if let Some(selected) = pick_repo(&repos) {
                 println!("{selected}");
             }
         }
