@@ -14,6 +14,10 @@ default: build
 build:
     cargo build --release
 
+# Build static binary via musl + mimalloc
+build-static:
+    cargo build --release --target x86_64-unknown-linux-musl -p pp-cli
+
 # Build the FFI cdylib for THIS machine (-C target-cpu=native).
 # For a portable build (any x86-64) use `just nvim-portable`.
 build-nvim-native:
@@ -41,6 +45,15 @@ test-lua:
 
 install: build install-bin install-fish install-completions
     @echo "✓ pp installed — restart your shell or: source {{fish_func_dir}}/pp.fish"
+
+# Build and install static musl + mimalloc binary + shell integrations
+install-static: build-static
+    @mkdir -p {{install_dir}}
+    cp -f target/x86_64-unknown-linux-musl/release/{{bin_name}} {{install_dir}}/{{bin_name}}
+    @echo "✓ Static binary (musl + mimalloc) → {{install_dir}}/{{bin_name}}"
+    @just install-fish
+    @just install-completions
+    @echo "✓ pp static installed — restart your shell or: source {{fish_func_dir}}/pp.fish"
 
 install-bin:
     @mkdir -p {{install_dir}}

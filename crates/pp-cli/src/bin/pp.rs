@@ -7,6 +7,10 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use std::io::{self, Write};
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Fast repository locator", long_about = None)]
 struct Args {

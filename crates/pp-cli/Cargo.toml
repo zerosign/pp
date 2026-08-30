@@ -13,6 +13,11 @@ pp = { path = "../pp" }
 clap.workspace = true
 clap_complete.workspace = true
 dialoguer.workspace = true
+mimalloc = { workspace = true, optional = true }
+
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 
 [lints]
 workspace = true
