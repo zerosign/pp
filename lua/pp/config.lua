@@ -9,8 +9,9 @@ M.defaults = {
   binary = 'pp', -- binary name (must be on PATH) or absolute path
   prompt = 'Workspace Project > ',
   files_prompt = '%s Files> ', -- %s is substituted with the project basename
-  picker = nil, -- custom picker: { pick = fn(items, opts), files = fn(opts) }
-  -- (nil -> FFI float picker, fzf-lua fallback)
+  open_files = true, -- open files picker after switching project
+  picker = nil, -- custom project picker: table { pick = fn, files = fn } or function/provider string
+  files_picker = nil, -- custom files picker: function(opts), table { files = fn }, or provider string ('auto', 'fzf-lua', 'snacks', 'telescope', 'mini.pick', 'dir', 'none')
 
   -- FFI float picker options
   lib_path = nil, -- nil -> <plugin>/build/libpp_nvim.so

@@ -50,6 +50,9 @@ require('pp').setup({
   binary = 'pp',                  -- Path or binary name for pp CLI on $PATH
   prompt = 'Workspace Project > ', -- Floating picker prompt
   files_prompt = '%s Files> ',     -- Post-selection files picker prompt (%s = project name)
+  open_files = true,              -- Whether to open a files picker after selecting a project
+  files_picker = 'auto',          -- 'auto' | 'fzf-lua' | 'snacks' | 'telescope' | 'mini.pick' | 'dir' | 'none'
+  picker = nil,                   -- Custom project picker: fn(list, opts) or table { pick = fn, files = fn }
   default_mode = 'substring',     -- Default match mode: substring | fuzzy | prefix | subseq
   fuzzy_distance = 2,             -- Max Levenshtein edit distance for fuzzy mode
   max_results = 200,              -- Max search results rendered per keystroke

@@ -35,12 +35,15 @@ M.clear = projects.clear
 -- ---------------------------------------------------------------------------
 
 local function open_files(path)
-  local name = vim.fs.basename(path)
-  local fzf = picker.get_files()
-  if not fzf then
+  if not config.options.open_files then
     return
   end
-  fzf.files({
+  local name = vim.fs.basename(path)
+  local fn = picker.get_files()
+  if not fn then
+    return
+  end
+  fn({
     cwd = path,
     prompt = string.format(config.options.files_prompt, name),
   })

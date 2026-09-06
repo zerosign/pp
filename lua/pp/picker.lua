@@ -445,23 +445,82 @@ local function open_float(opts)
 end
 
 -- ---------------------------------------------------------------------------
--- fzf-lua / custom picker (fallback path)
+-- ---------------------------------------------------------------------------
+-- Configurable / auto-detecting fallback pickers
 -- ---------------------------------------------------------------------------
 
-local function fzf_lua_picker()
-  local ok, fzf = pcall(require, 'fzf-lua')
-  if not ok then
-    util.notify('pp.nvim: fzf-lua is required (or provide `opts.picker`)', vim.log.levels.ERROR)
+local function resolve_files_picker()
+  local custom = config.options.files_picker or config.options.picker
+  if type(custom) == 'function' then
+    return custom
+  end
+  if type(custom) == 'table' and type(custom.files) == 'function' then
+    return function(opts)
+      custom.files(opts)
+    end
+  end
+
+  local provider = type(custom) == 'string' and custom or 'auto'
+
+  if provider == 'none' then
     return nil
   end
-  return {
-    pick = function(items, opts)
-      fzf.fzf_exec(items, opts)
-    end,
-    files = function(opts)
-      fzf.files(opts)
-    end,
-  }
+
+  if provider == 'fzf-lua' or provider == 'auto' then
+    local ok, fzf = pcall(require, 'fzf-lua')
+    if ok then
+      return function(opts)
+        fzf.files(opts)
+      end
+    elseif provider == 'fzf-lua' then
+      util.notify('pp.nvim: fzf-lua is required for files_picker = "fzf-lua"', vim.log.levels.ERROR)
+      return nil
+    end
+  end
+
+  if provider == 'snacks' or provider == 'auto' then
+    local ok, snacks = pcall(require, 'snacks')
+    if ok and snacks.picker then
+      return function(opts)
+        snacks.picker.files({ cwd = opts.cwd })
+      end
+    elseif provider == 'snacks' then
+      util.notify('pp.nvim: snacks.nvim is required for files_picker = "snacks"', vim.log.levels.ERROR)
+      return nil
+    end
+  end
+
+  if provider == 'telescope' or provider == 'auto' then
+    local ok, builtin = pcall(require, 'telescope.builtin')
+    if ok then
+      return function(opts)
+        builtin.find_files({ cwd = opts.cwd })
+      end
+    elseif provider == 'telescope' then
+      util.notify('pp.nvim: telescope is required for files_picker = "telescope"', vim.log.levels.ERROR)
+      return nil
+    end
+  end
+
+  if provider == 'mini.pick' or provider == 'auto' then
+    local ok, mini = pcall(require, 'mini.pick')
+    if ok then
+      return function(opts)
+        mini.builtin.files({}, { source = { cwd = opts.cwd } })
+      end
+    elseif provider == 'mini.pick' then
+      util.notify('pp.nvim: mini.pick is required for files_picker = "mini.pick"', vim.log.levels.ERROR)
+      return nil
+    end
+  end
+
+  if provider == 'dir' or provider == 'auto' then
+    return function(opts)
+      vim.cmd('edit ' .. vim.fn.fnameescape(opts.cwd))
+    end
+  end
+
+  return nil
 end
 
 local function pick_custom(opts)
@@ -470,11 +529,21 @@ local function pick_custom(opts)
       util.notify('No projects found. Run `:PpIndex` to build the index.', vim.log.levels.WARN)
       return
     end
-    local fzf = fzf_lua_picker()
-    if not fzf then
+    local custom = config.options.picker
+    if type(custom) == 'function' then
+      custom(list, opts)
       return
     end
-    fzf.pick(list, {
+    if type(custom) == 'table' and type(custom.pick) == 'function' then
+      custom.pick(list, opts)
+      return
+    end
+    local ok, fzf = pcall(require, 'fzf-lua')
+    if not ok then
+      util.notify('pp.nvim: fzf-lua is required (or provide custom `opts.picker`)', vim.log.levels.ERROR)
+      return
+    end
+    fzf.fzf_exec(list, {
       prompt = opts.prompt,
       winopts = { preview = { hidden = 'hidden' } },
       actions = {
@@ -493,13 +562,10 @@ end
 -- Public API
 -- ---------------------------------------------------------------------------
 
---- The picker used for the post-selection `files` step (fzf-lua, or the
---- configured custom picker). Returns nil if none is available.
+--- The picker function used for the post-selection `files` step.
+--- Called as `fn({ cwd = path, prompt = prompt })`.
 function M.get_files()
-  if config.options.picker then
-    return config.options.picker
-  end
-  return fzf_lua_picker()
+  return resolve_files_picker()
 end
 
 --- Open the project picker. `opts`: `prompt`, `mode`, `on_select(path)`.

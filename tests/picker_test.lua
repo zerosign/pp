@@ -121,4 +121,22 @@ picker._debug.cancel()
 assert(find_picker() == nil, 'float closed after cancel')
 assert(selected == nil, 'cancel selects nothing')
 
+-- 7. Configurable files_picker and open_files options -------------------------
+local config = require('pp.config')
+config.setup({ files_picker = 'none' })
+assert(picker.get_files() == nil, 'files_picker = "none" returns nil provider')
+
+local called_cwd = nil
+config.setup({
+  files_picker = function(opts)
+    called_cwd = opts.cwd
+  end,
+})
+local fn = picker.get_files()
+assert(type(fn) == 'function', 'custom files_picker function returned')
+fn({ cwd = '/tmp/fake_dir' })
+assert(called_cwd == '/tmp/fake_dir', 'custom files_picker invoked with cwd')
+
+config.setup({}) -- restore defaults
+
 print('PICKER TEST PASSED')
