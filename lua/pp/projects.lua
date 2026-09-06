@@ -22,7 +22,7 @@ local function run(args, on_success)
     if obj.code ~= 0 then
       local err = (obj.stderr or ''):gsub('%s+$', '')
       if err == '' then
-        err = 'is `pp` on your PATH? Try `just install` in ~/Repositories/projects/pp.'
+        err = 'is `pp` on your PATH? Build and install it first (see the README).'
       end
       notify(
         string.format('pp %s failed (%d): %s', table.concat(args, ' '), obj.code, err),

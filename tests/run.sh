@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 # Sandboxed test harness for pp.nvim.
 #
-# Everything runs inside tests/sandbox: a fake $HOME with fake repositories,
-# isolated XDG dirs, and a freshly built pp index. Neither your real nvim
-# config/state nor your real repository index is ever touched:
+# Everything runs inside an isolated temp dir: a fake $HOME with fake
+# repositories, isolated XDG dirs, and a freshly built pp index. Neither your
+# real nvim config/state nor your real repository index is ever touched:
 #   - nvim runs with -u NONE -i NONE and HOME/XDG_* pointed into the sandbox
 #   - pp resolves config/cache/roots from the same overridden env
 #
-# Usage: ./tests/run.sh
+# The sandbox lives in a unique mktemp dir (no clobbering the working tree,
+# safe under read-only checkouts and parallel runs). Set PP_TEST_SANDBOX to a
+# path to keep one you can drive manually with tmux, e.g.:
+#   PP_TEST_SANDBOX=/tmp/pp-sb ./tests/run.sh && \
+#     env HOME=/tmp/pp-sb/home XDG_CONFIG_HOME=/tmp/pp-sb/home/.config \
+#       nvim -u /tmp/pp-sb/init.lua -i NONE
+#
+# Usage: ./tests/run.sh        (needs: cargo, nvim, luajit, pp deps)
 set -uo pipefail
-cd "$(dirname "$0")/.." # repo root
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
-BIN=target/release/pp
+BIN="$ROOT/target/release/pp"
 if [ ! -x "$BIN" ]; then
   echo "==> building pp binary"
   cargo build --release --bin pp >/dev/null
 fi
 
-SB=tests/sandbox
+SB="${PP_TEST_SANDBOX:-$(mktemp -d "$(basename "$ROOT")-tests.XXXXXX" 2>/dev/null || mktemp -d)}"
+trap 'rm -rf "$SB"' EXIT
 echo "==> building sandbox in $SB"
-rm -rf "$SB"
 mkdir -p "$SB/home/Repositories/work" \
   "$SB/home/.config/pp" \
   "$SB/home/.local/share" "$SB/home/.local/state" \
@@ -44,12 +52,11 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_STATE_HOME="$HOME/.local/state"
 
-# Minimal nvim init for tmux/manual testing with this sandbox.
-# Headless tests use -u NONE and load scripts directly; this file
-# exists so `env HOME=... XDG_*=... nvim -u tests/sandbox/init.lua`
-# boots a working pp session against the fake repos.
+# Minimal nvim init for manual testing with this sandbox. Headless tests use
+# -u NONE and load scripts directly; this file lets you boot an interactive
+# session against the fake repos (see the PP_TEST_SANDBOX example above).
 cat > "$SB/init.lua" <<LUA
-vim.opt.runtimepath:prepend('${PWD}')
+vim.opt.runtimepath:prepend('${ROOT}')
 require('pp').setup({})
 LUA
 
@@ -60,6 +67,15 @@ echo "==> indexing sandbox repos"
 "$BIN" index
 
 fail=0
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "!! missing required command: $1"
+    exit 1
+  fi
+}
+require_cmd nvim
+require_cmd luajit
+
 run_suite() {
   local name="$1" script="tests/$2" out
   echo "==> $name"
@@ -83,7 +99,7 @@ DUMP="$SB/jit_dump.txt"
 JIT_OUT=$(luajit -e '
 local jd = require("jit.dump")
 jd.start("a,s", "'"$DUMP"'")
-local f = assert(loadfile("tests/jit_audit.lua"))
+local f = assert(loadfile("'"$ROOT"'/tests/jit_audit.lua"))
 f()
 ' 2>&1) || true
 printf '%s\n' "$JIT_OUT"
