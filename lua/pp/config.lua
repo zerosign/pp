@@ -11,7 +11,7 @@ M.defaults = {
   files_prompt = '%s Files> ', -- %s is substituted with the project basename
   open_files = true, -- open files picker after switching project
   picker = nil, -- custom project picker: table { pick = fn, files = fn } or function/provider string
-  files_picker = nil, -- custom files picker: function(opts), table { files = fn }, or provider string ('auto', 'fzf-lua', 'snacks', 'telescope', 'mini.pick', 'dir', 'none')
+  files_picker = 'dir', -- default to built-in Neovim directory viewer ('dir'). Optional plugins: 'fzf-lua', 'snacks', 'telescope', 'mini.pick', 'auto', 'none'
 
   -- FFI float picker options
   lib_path = nil, -- nil -> <plugin>/build/libpp_nvim.so

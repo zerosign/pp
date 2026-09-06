@@ -85,7 +85,7 @@ Field                   Default                 Description ~
 `prompt`                `"Workspace Project > "` Prompt string for workspace picker
 `files_prompt`          `"%s Files> "`          Prompt string for files picker
 `open_files`            `true`                  Open files picker after selecting a project
-`files_picker`          `"auto"`                Files picker ("auto"|"fzf-lua"|"snacks"|"telescope"|"mini.pick"|"dir"|"none")
+`files_picker`          `"dir"`                 Files picker ("dir"|"fzf-lua"|"snacks"|"telescope"|"mini.pick"|"auto"|"none")
 `picker`                `nil`                   Custom project picker table or function
 `default_mode`          `"substring"`           Default match mode (`substring|fuzzy|prefix|subseq`)
 `fuzzy_distance`        `2`                     Max Levenshtein edit distance for fuzzy mode

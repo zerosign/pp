@@ -460,7 +460,7 @@ local function resolve_files_picker()
     end
   end
 
-  local provider = type(custom) == 'string' and custom or 'auto'
+  local provider = type(custom) == 'string' and custom or 'dir'
 
   if provider == 'none' then
     return nil

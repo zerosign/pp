@@ -138,5 +138,7 @@ fn({ cwd = '/tmp/fake_dir' })
 assert(called_cwd == '/tmp/fake_dir', 'custom files_picker invoked with cwd')
 
 config.setup({}) -- restore defaults
+local default_fn = picker.get_files()
+assert(type(default_fn) == 'function', 'default files_picker returns built-in "dir" provider')
 
 print('PICKER TEST PASSED')
