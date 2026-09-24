@@ -52,6 +52,12 @@ pub struct Config {
     /// repositories reached through symlinks is an explicit opt-in.
     #[serde(default)]
     pub follow_symlinks: bool,
+    /// Subtrees where a repository is not treated as a leaf: the scan keeps
+    /// descending past a project marker, so nested repositories are
+    /// indexed too. Empty by default: a detected repository always
+    /// terminates the walk.
+    #[serde(default)]
+    pub nested_projects: Vec<String>,
 }
 
 fn default_max_depth() -> usize {
@@ -106,6 +112,7 @@ impl Default for Config {
             max_depth: default_max_depth(),
             index_ttl_days: default_index_ttl_days(),
             follow_symlinks: false,
+            nested_projects: Vec::new(),
         }
     }
 }
@@ -193,18 +200,23 @@ type Pending = Vec<(PathBuf, usize)>;
 /// directories and all roots), so only `out` + `pending` allocate — both
 /// amortized-grown — instead of building a `Vec` per visited directory.
 ///
-/// The `pending.truncate` on a marker hit mirrors the old recursive
-/// early-`break`: children discovered in this directory before the marker
-/// appeared in readdir order are discarded and never descended into.
+/// A directory holding a project marker is a leaf: children seen before
+/// the marker are discarded (`pending.truncate`) and the rest are skipped
+/// (early `break`), mirroring the original recursive walk. Inside a
+/// `nested_projects` subtree the marker is noted but iteration continues, so
+/// every child is queued and nested repositories are found.
 fn scan_directory(
     root: &Path,
     out: &mut Vec<PathBuf>,
     pending: &mut Pending,
-    ignored_dirs: &[String],
-    project_markers: &[String],
-    max_depth: usize,
-    follow_symlinks: bool,
+    config: &Config,
+    nested_projects: &[PathBuf],
 ) {
+    let ignored_dirs = config.ignored_dirs.as_slice();
+    let project_markers = config.project_markers.as_slice();
+    let max_depth = config.max_depth;
+    let follow_symlinks = config.follow_symlinks;
+
     pending.push((root.to_path_buf(), 0));
 
     while let Some((dir, depth)) = pending.pop() {
@@ -225,13 +237,23 @@ fn scan_directory(
         };
 
         let mark = pending.len();
+        // Repos are normally leaves; only inside a `nested_projects` subtree
+        // (at/below a listed prefix) does descent continue past a project
+        // marker. A dir that is an ANCESTOR of a listed prefix is also
+        // covered, since pruning it would make the prefix unreachable.
+        let covered = nested_projects
+            .iter()
+            .any(|nested| dir.starts_with(nested) || nested.starts_with(&dir));
         let mut has_marker = false;
         for entry in read_dir.filter_map(std::result::Result::ok) {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
             if project_markers.iter().any(|marker| marker == &*name) {
                 has_marker = true;
-                break;
+                if !covered {
+                    break;
+                }
+                continue;
             }
             // entry.file_type() does not follow symlinks; fs::metadata does.
             // Following is opt-in (Config::follow_symlinks) because an outbound
@@ -248,7 +270,9 @@ fn scan_directory(
         }
 
         if has_marker {
-            pending.truncate(mark);
+            if !covered {
+                pending.truncate(mark);
+            }
             out.push(dir);
         }
     }
@@ -257,6 +281,7 @@ fn scan_directory(
 /// Live-scan all configured roots for repositories (no cache involved).
 #[must_use]
 pub fn scan_repos(config: &Config) -> Vec<PathBuf> {
+    let nested: Vec<PathBuf> = config.nested_projects.iter().map(|p| expand_path(p)).collect();
     let mut out = Vec::new();
     let mut pending = Vec::new();
     for root in config
@@ -265,15 +290,7 @@ pub fn scan_repos(config: &Config) -> Vec<PathBuf> {
         .map(|root| expand_path(root))
         .filter(|root| root.exists())
     {
-        scan_directory(
-            &root,
-            &mut out,
-            &mut pending,
-            &config.ignored_dirs,
-            &config.project_markers,
-            config.max_depth,
-            config.follow_symlinks,
-        );
+        scan_directory(&root, &mut out, &mut pending, config, &nested);
     }
     out
 }
@@ -755,10 +772,8 @@ mod tests {
             &tmp,
             &mut found,
             &mut Vec::new(),
-            &config.ignored_dirs,
-            &config.project_markers,
-            config.max_depth,
-            config.follow_symlinks,
+            &config,
+            &[],
         );
         found.sort();
 
@@ -778,10 +793,8 @@ mod tests {
             &tmp,
             &mut found,
             &mut Vec::new(),
-            &config.ignored_dirs,
-            &config.project_markers,
-            config.max_depth,
-            config.follow_symlinks,
+            &config,
+            &[],
         );
         found.sort();
 
@@ -793,8 +806,8 @@ mod tests {
 
     /// A directory that is itself a repository must be returned as a whole,
     /// and none of its children may appear in the results regardless of
-    /// readdir order — the marker hit has to discard (truncate) any children
-    /// already pushed onto the pending stack.
+    /// readdir order — the hit on a project marker has to discard
+    /// (truncate) any children already pushed onto the pending stack.
     #[test]
     #[cfg(unix)]
     fn scan_marker_prunes_children_pushed_before_it() {
@@ -803,8 +816,9 @@ mod tests {
         let parent = tmp.join("parent");
         std::fs::create_dir_all(parent.join("child-a/deeper")).unwrap();
         std::fs::create_dir_all(parent.join("child-b")).unwrap();
-        // The marker is a plain entry; readdir order decides whether the
-        // children are pushed onto the pending stack before it is seen.
+        // The project marker is a plain entry; readdir order decides
+        // whether the children are pushed onto the pending stack before it
+        // is seen.
         std::fs::write(parent.join(".git"), "").unwrap();
         // A sibling repo to prove the scan continues past the pruned subtree.
         let sibling = tmp.join("sibling");
@@ -820,10 +834,8 @@ mod tests {
             Path::new(&config.roots[0]),
             &mut found,
             &mut Vec::new(),
-            &config.ignored_dirs,
-            &config.project_markers,
-            config.max_depth,
-            config.follow_symlinks,
+            &config,
+            &[],
         );
         found.sort();
 
@@ -835,6 +847,93 @@ mod tests {
                 .iter()
                 .all(|p| p == &parent || !p.starts_with(&parent))
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Inside a `nested_projects` subtree, a project-marker hit emits the
+    /// directory but does NOT prune it, so nested repositories are found at
+    /// any depth. Outside
+    /// the subtree, repos stay leaves as before. Driven through `scan_repos`
+    /// to also cover prefix expansion.
+    #[test]
+    #[cfg(unix)]
+    fn scan_nested_projects_descends_inside_subtree() {
+        let tmp = std::env::temp_dir().join(format!("pp-scan-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(repo.join("inner")).unwrap();
+        std::fs::create_dir_all(repo.join("plain/leaf")).unwrap();
+        std::fs::write(repo.join(".git"), "").unwrap();
+        std::fs::write(repo.join("inner/Cargo.toml"), "").unwrap();
+        std::fs::write(repo.join("plain/leaf/package.json"), "").unwrap();
+        // A repo outside the nested subtree keeps leaf semantics.
+        let sibling = tmp.join("sibling");
+        std::fs::create_dir_all(sibling.join("child")).unwrap();
+        std::fs::write(sibling.join(".git"), "").unwrap();
+        std::fs::write(sibling.join("child/go.mod"), "").unwrap();
+
+        let config = Config {
+            roots: vec![tmp.to_string_lossy().into_owned()],
+            nested_projects: vec![repo.to_string_lossy().into_owned()],
+            ..Config::default()
+        };
+        let mut found = scan_repos(&config);
+        found.sort();
+
+        let expected: Vec<PathBuf> = [
+            repo.clone(),
+            repo.join("inner"),
+            repo.join("plain/leaf"),
+            sibling,
+        ]
+        .to_vec();
+        assert_eq!(found, expected);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A prefix deeper than an enclosing repo still works: the repo is an
+    /// ancestor of the listed subtree, so the walk descends *past* its
+    /// project marker (ancestor rule). Sibling repos off the path still
+    /// prune.
+    #[test]
+    #[cfg(unix)]
+    fn scan_nested_projects_reaches_through_repo_ancestor() {
+        let tmp = std::env::temp_dir().join(format!("pp-scan-nested-anc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        let target = repo.join("deep/nested-target");
+        std::fs::create_dir_all(repo.join("deep/nested-other/child")).unwrap();
+        std::fs::create_dir_all(target.join("sub")).unwrap();
+        std::fs::create_dir_all(repo.join("side/x")).unwrap();
+        std::fs::write(repo.join(".git"), "").unwrap();
+        std::fs::write(target.join("Cargo.toml"), "").unwrap();
+        std::fs::write(target.join("sub/.git"), "").unwrap();
+        std::fs::write(repo.join("deep/nested-other/package.json"), "").unwrap();
+        std::fs::write(repo.join("deep/nested-other/child/.git"), "").unwrap();
+        std::fs::write(repo.join("side/go.mod"), "").unwrap();
+        std::fs::write(repo.join("side/x/Cargo.toml"), "").unwrap();
+
+        let config = Config {
+            roots: vec![tmp.to_string_lossy().into_owned()],
+            nested_projects: vec![target.to_string_lossy().into_owned()],
+            ..Config::default()
+        };
+        let mut found = scan_repos(&config);
+        found.sort();
+
+        let expected: Vec<PathBuf> = [
+            repo.clone(),
+            // Repos not covered by the prefix: emitted, but pruned as leaves.
+            repo.join("deep/nested-other"),
+            // Inside the listed subtree (and at the prefix itself): no pruning.
+            repo.join("deep/nested-target"),
+            target.join("sub"),
+            repo.join("side"),
+        ]
+        .to_vec();
+        assert_eq!(found, expected);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

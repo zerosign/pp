@@ -110,7 +110,7 @@ just test-lua             # Run sandboxed Lua tests and LuaJIT trace audits
 
 ## How It Works
 
-- **Indexing**: `pp` maintains an immutable `fst::Set` of absolute paths under configured root directories (`~/Repositories` by default, configurable in `~/.config/pp/config.toml`).
+- **Indexing**: `pp` maintains an immutable `fst::Set` of absolute paths under configured root directories (configurable in `~/.config/pp/config.toml`). A detected repository is a leaf by default; subtrees listed in `nested_projects` are descended past instead, so nested repositories inside them are indexed too.
 - **Search & Ranking**: Matches are ranked per keystroke: exact basename matches first, followed by prefix, substring, and subsequence matches.
 - **FFI Performance**: The Neovim floating UI passes queries to `libpp_nvim.so` via LuaJIT FFI. Matching runs entirely in compiled C/Rust code; Lua only renders the resulting lines to the buffer.
 - **Automatic Cache Invalidation**: The FFI layer monitors `index.fst` modification timestamps on disk and reloads instantly when reindexed by another process.
