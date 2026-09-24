@@ -1,59 +1,60 @@
-//! `pp` — interactive repository picker (skim) and CLI subcommands.
+//! `pp` — interactive repository picker (dialoguer) and CLI subcommands.
 //!
 //! UI and IO live here; all index/search logic is delegated to the `pp` lib
-//! crate.
+//! crate. Argument parsing uses `usage-rs` derives: the parser, help pages,
+//! shell-completion scripts, and the emitted usage spec all come from the
+//! same declaration.
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
 use std::io::{self, Write};
+use usage::{Args, Cli, Subcommands, ValueEnum};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[derive(Parser, Debug)]
-#[command(author, version, about = "Fast repository locator", long_about = None)]
-struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-
+/// Fast repository locator
+#[derive(Cli)]
+#[usage(bin = "pp", version, about = "Fast repository locator", completion)]
+struct Pp {
     /// Force a fresh scan, bypassing the cache
-    #[arg(short, long, global = true)]
+    #[usage(short, long, global)]
     no_cache: bool,
+
+    #[usage(subcommand)]
+    command: Option<Command>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommands)]
 enum Command {
     /// Rebuild the repository index
     Index,
     /// Print the plain list of repositories to stdout
     List,
     /// Search the repository index
-    Search {
-        /// Search mode
-        #[arg(long, value_enum, default_value = "substring")]
-        mode: SearchModeArg,
-        /// Maximum edit distance for fuzzy search (fuzzy mode only)
-        #[arg(long, default_value_t = pp::SearchMode::DEFAULT_FUZZY_DISTANCE)]
-        distance: u32,
-        /// Maximum number of results to print
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Search query
-        query: String,
-    },
+    Search(Search),
     /// Clear the index database
     Clear,
     /// Generate autocomplete script for specified shell
-    Generate {
-        /// Shell to generate completions for
-        #[arg(value_enum)]
-        shell: Shell,
-    },
+    Generate(Generate),
 }
 
-/// CLI spelling of [`pp::SearchMode`] (clap value enums cannot live in the lib).
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[derive(Args)]
+struct Search {
+    /// Search mode
+    #[usage(long, value_enum, default = "substring")]
+    mode: SearchModeArg,
+    /// Maximum edit distance for fuzzy search (fuzzy mode only)
+    #[usage(long, default = "2")]
+    distance: u32,
+    /// Maximum number of results to print
+    #[usage(long)]
+    limit: Option<usize>,
+    /// Search query
+    query: String,
+}
+
+/// CLI spelling of [`pp::SearchMode`] (value enums cannot live in the lib).
+#[derive(ValueEnum, Clone, Copy, Debug)]
 enum SearchModeArg {
     Substring,
     Prefix,
@@ -68,6 +69,37 @@ impl From<SearchModeArg> for pp::SearchMode {
             SearchModeArg::Prefix => Self::Prefix,
             SearchModeArg::Fuzzy => Self::Fuzzy,
             SearchModeArg::Subseq => Self::Subseq,
+        }
+    }
+}
+
+#[derive(Args)]
+struct Generate {
+    /// Shell to generate completions for
+    #[usage(value_enum)]
+    shell: Shell,
+}
+
+/// Shells with installable completion scripts.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum Shell {
+    Bash,
+    Elvish,
+    Fish,
+    /// PowerShell — word stays "powershell" despite the variant name.
+    #[usage(name = "powershell")]
+    Pwsh,
+    Zsh,
+}
+
+impl From<Shell> for usage::complete::Shell {
+    fn from(shell: Shell) -> Self {
+        match shell {
+            Shell::Bash => Self::Bash,
+            Shell::Elvish => Self::Elvish,
+            Shell::Fish => Self::Fish,
+            Shell::Pwsh => Self::PowerShell,
+            Shell::Zsh => Self::Zsh,
         }
     }
 }
@@ -98,17 +130,18 @@ fn print_lines<'a>(lines: impl Iterator<Item = &'a str>) -> io::Result<()> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    // `parse()` renders help/version and clap-shaped diagnostics itself,
+    // exiting the way clap does (2 on a parse failure).
+    let pp = Pp::parse();
 
-    match args.command {
-        Some(Command::Generate { shell }) => {
-            let mut cmd = Args::command();
-            
-            clap_complete::generate(shell, &mut cmd, "pp", &mut io::stdout());
+    match pp.command {
+        Some(Command::Generate(generate)) => {
+            let script = Pp::completion_script(generate.shell.into());
+            io::stdout().write_all(script.as_bytes())?;
         }
         Some(Command::Clear) => {
             let (_, db_path) = pp::cache_paths()?;
-            
+
             if db_path.exists() {
                 std::fs::remove_file(&db_path)?;
                 eprintln!("Index cleared.");
@@ -117,33 +150,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Index) => {
             let config = pp::load_config();
             let (cache_dir, db_path) = pp::cache_paths()?;
-            
+
             pp::reindex(&config, &cache_dir, &db_path)?;
         }
         Some(Command::List) => {
             let config = pp::load_config();
             let (cache_dir, db_path) = pp::cache_paths()?;
-            let repos = pp::get_repos(&config, &cache_dir, &db_path, args.no_cache)?;
-            
+            let repos = pp::get_repos(&config, &cache_dir, &db_path, pp.no_cache)?;
+
             print_lines(repos.iter().map(String::as_str))?;
         }
-        Some(Command::Search {
-            mode,
-            distance,
-            limit,
-            query,
-        }) => {
+        Some(Command::Search(search)) => {
             let config = pp::load_config();
             let (cache_dir, db_path) = pp::cache_paths()?;
-            
+
             let repos = pp::search(
                 &config,
                 &cache_dir,
                 &db_path,
-                &query,
-                mode.into(),
-                distance,
-                limit,
+                &search.query,
+                search.mode.into(),
+                search.distance,
+                search.limit,
             )?;
 
             print_lines(repos.iter().map(String::as_str))?;
@@ -151,8 +179,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             let config = pp::load_config();
             let (cache_dir, db_path) = pp::cache_paths()?;
-            let repos = pp::get_repos(&config, &cache_dir, &db_path, args.no_cache)?;
-            
+            let repos = pp::get_repos(&config, &cache_dir, &db_path, pp.no_cache)?;
+
             if repos.is_empty() {
                 eprintln!("No repositories found. Run `pp index` to build the index.");
                 return Ok(());

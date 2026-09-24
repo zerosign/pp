@@ -11,8 +11,7 @@ path = "src/bin/pp.rs"
 
 [dependencies]
 pp = { path = "../pp" }
-clap.workspace = true
-clap_complete.workspace = true
+usage.workspace = true
 dialoguer.workspace = true
 mimalloc = { workspace = true, optional = true }
 
