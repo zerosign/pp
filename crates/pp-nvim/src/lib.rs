@@ -249,8 +249,8 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
         let repo_path = repo_dir.to_string_lossy().into_owned();
 
-        // Write the index directly with fst (rather than pp::reindex, which
-        // uses rayon; rayon's thread spawns are not miri-compatible).
+        // Write the index directly with fst (rather than pp::reindex) so the
+        // test owns the exact repository list without a live scan.
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let mut builder = fst::SetBuilder::new(Vec::<u8>::new()).unwrap();
         builder.insert(&repo_path).unwrap();

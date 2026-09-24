@@ -21,7 +21,6 @@
 //!   stale, or unreadable index.
 
 use fst::{Set, SetBuilder};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -185,89 +184,98 @@ fn expand_path(path: &str) -> PathBuf {
     }
 }
 
+/// DFS worklist of directories awaiting a scan, with their root-relative depth.
+type Pending = Vec<(PathBuf, usize)>;
+
+/// Accumulator-shaped scan: repositories found under `root` are pushed into `out`.
+///
+/// `pending` is a reusable DFS stack shared across the whole scan (all
+/// directories and all roots), so only `out` + `pending` allocate — both
+/// amortized-grown — instead of building a `Vec` per visited directory.
+///
+/// The `pending.truncate` on a marker hit mirrors the old recursive
+/// early-`break`: children discovered in this directory before the marker
+/// appeared in readdir order are discarded and never descended into.
 fn scan_directory(
-    path: &Path,
+    root: &Path,
+    out: &mut Vec<PathBuf>,
+    pending: &mut Pending,
     ignored_dirs: &[String],
     project_markers: &[String],
-    depth: usize,
     max_depth: usize,
     follow_symlinks: bool,
-) -> Vec<PathBuf> {
-    if depth >= max_depth {
-        return vec![];
-    }
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| ignored_dirs.iter().any(|ignored| ignored == name))
-    {
-        return vec![];
-    }
+) {
+    pending.push((root.to_path_buf(), 0));
 
-    let Ok(read_dir) = fs::read_dir(path) else {
-        return vec![];
-    };
-
-    let mut subdirs = Vec::new();
-    let mut has_marker = false;
-    for entry in read_dir.filter_map(std::result::Result::ok) {
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        if project_markers.iter().any(|marker| marker == &*name) {
-            has_marker = true;
-            break;
+    while let Some((dir, depth)) = pending.pop() {
+        if depth >= max_depth {
+            continue;
         }
-        // entry.file_type() does not follow symlinks; fs::metadata does.
-        // Following is opt-in (Config::follow_symlinks) because an outbound
-        // link can pull arbitrary trees into the scan.
-        let is_dir = if follow_symlinks {
-            fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
-        } else {
-            entry.file_type().is_ok_and(|ft| ft.is_dir())
+
+        if dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| ignored_dirs.iter().any(|ignored| ignored == name))
+        {
+            continue;
+        }
+
+        let Ok(read_dir) = fs::read_dir(&dir) else {
+            continue;
         };
-        if is_dir && !ignored_dirs.iter().any(|ignored| ignored == &*name) {
-            subdirs.push(entry.path());
+
+        let mark = pending.len();
+        let mut has_marker = false;
+        for entry in read_dir.filter_map(std::result::Result::ok) {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if project_markers.iter().any(|marker| marker == &*name) {
+                has_marker = true;
+                break;
+            }
+            // entry.file_type() does not follow symlinks; fs::metadata does.
+            // Following is opt-in (Config::follow_symlinks) because an outbound
+            // link can pull arbitrary trees into the scan.
+            let is_dir = if follow_symlinks {
+                fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
+            } else {
+                entry.file_type().is_ok_and(|ft| ft.is_dir())
+            };
+
+            if is_dir && !ignored_dirs.iter().any(|ignored| ignored == &*name) {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+
+        if has_marker {
+            pending.truncate(mark);
+            out.push(dir);
         }
     }
-
-    if has_marker {
-        return vec![path.to_path_buf()];
-    }
-
-    subdirs
-        .into_par_iter()
-        .flat_map(|entry| {
-            scan_directory(
-                &entry,
-                ignored_dirs,
-                project_markers,
-                depth + 1,
-                max_depth,
-                follow_symlinks,
-            )
-        })
-        .collect()
 }
 
 /// Live-scan all configured roots for repositories (no cache involved).
 #[must_use]
 pub fn scan_repos(config: &Config) -> Vec<PathBuf> {
-    config
+    let mut out = Vec::new();
+    let mut pending = Vec::new();
+    for root in config
         .roots
         .iter()
         .map(|root| expand_path(root))
         .filter(|root| root.exists())
-        .flat_map(|root| {
-            scan_directory(
-                &root,
-                &config.ignored_dirs,
-                &config.project_markers,
-                0,
-                config.max_depth,
-                config.follow_symlinks,
-            )
-        })
-        .collect()
+    {
+        scan_directory(
+            &root,
+            &mut out,
+            &mut pending,
+            &config.ignored_dirs,
+            &config.project_markers,
+            config.max_depth,
+            config.follow_symlinks,
+        );
+    }
+    out
 }
 
 fn to_sorted_strings(repos: Vec<PathBuf>) -> Vec<String> {
@@ -311,12 +319,15 @@ pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("index.fst");
+
     let tmp_path = db_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
 
     let mut builder = SetBuilder::new(Vec::<u8>::new())?;
+    
     for repo in &repo_strings {
         builder.insert(repo)?;
     }
+
     fs::write(&tmp_path, builder.into_inner()?)?;
     fs::rename(&tmp_path, db_path)?;
 
@@ -331,6 +342,7 @@ pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<
         repo_strings.len(),
         start.elapsed()
     );
+
     Ok(repo_strings)
 }
 
@@ -552,6 +564,7 @@ pub fn search_matches(
         .map(String::as_str)
         .filter_map(|repo| mode.score(repo, &query_lower, distance).map(|score| (score, repo)))
         .collect();
+
     matched.sort_by_key(|item| item.0);
     matched
         .into_iter()
@@ -737,11 +750,13 @@ mod tests {
     #[cfg(unix)]
     fn scan_skips_symlinks_by_default() {
         let (tmp, config) = symlink_fixture("skip");
-        let mut found = scan_directory(
+        let mut found = Vec::new();
+        scan_directory(
             &tmp,
+            &mut found,
+            &mut Vec::new(),
             &config.ignored_dirs,
             &config.project_markers,
-            0,
             config.max_depth,
             config.follow_symlinks,
         );
@@ -758,11 +773,13 @@ mod tests {
     fn scan_follows_symlinked_directories_when_enabled() {
         let (tmp, mut config) = symlink_fixture("follow");
         config.follow_symlinks = true;
-        let mut found = scan_directory(
+        let mut found = Vec::new();
+        scan_directory(
             &tmp,
+            &mut found,
+            &mut Vec::new(),
             &config.ignored_dirs,
             &config.project_markers,
-            0,
             config.max_depth,
             config.follow_symlinks,
         );
@@ -770,6 +787,54 @@ mod tests {
 
         let names: Vec<&str> = found.iter().filter_map(|p| p.file_name()?.to_str()).collect();
         assert_eq!(names, vec!["link-repo", "real-repo"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A directory that is itself a repository must be returned as a whole,
+    /// and none of its children may appear in the results regardless of
+    /// readdir order — the marker hit has to discard (truncate) any children
+    /// already pushed onto the pending stack.
+    #[test]
+    #[cfg(unix)]
+    fn scan_marker_prunes_children_pushed_before_it() {
+        let tmp = std::env::temp_dir().join(format!("pp-scan-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let parent = tmp.join("parent");
+        std::fs::create_dir_all(parent.join("child-a/deeper")).unwrap();
+        std::fs::create_dir_all(parent.join("child-b")).unwrap();
+        // The marker is a plain entry; readdir order decides whether the
+        // children are pushed onto the pending stack before it is seen.
+        std::fs::write(parent.join(".git"), "").unwrap();
+        // A sibling repo to prove the scan continues past the pruned subtree.
+        let sibling = tmp.join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("Cargo.toml"), "").unwrap();
+
+        let mut found = Vec::new();
+        let config = Config {
+            roots: vec![tmp.to_string_lossy().into_owned()],
+            ..Config::default()
+        };
+        scan_directory(
+            Path::new(&config.roots[0]),
+            &mut found,
+            &mut Vec::new(),
+            &config.ignored_dirs,
+            &config.project_markers,
+            config.max_depth,
+            config.follow_symlinks,
+        );
+        found.sort();
+
+        let names: Vec<&str> = found.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert_eq!(names, vec!["parent", "sibling"]);
+        // No child of `parent` was ever emitted.
+        assert!(
+            found
+                .iter()
+                .all(|p| p == &parent || !p.starts_with(&parent))
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
