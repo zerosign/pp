@@ -3,7 +3,7 @@ name = "pp-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Interactive pp picker (skim) + CLI subcommands"
+description = "Interactive pp picker (fuzzy) + CLI subcommands"
 
 [[bin]]
 name = "pp"
@@ -12,12 +12,8 @@ path = "src/bin/pp.rs"
 [dependencies]
 pp = { path = "../pp" }
 usage.workspace = true
-dialoguer.workspace = true
-mimalloc = { workspace = true, optional = true }
-
-[features]
-default = ["mimalloc"]
-mimalloc = ["dep:mimalloc"]
+console.workspace = true
+fuzzy-matcher.workspace = true
 
 [lints]
 workspace = true
