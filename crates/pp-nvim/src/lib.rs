@@ -1,4 +1,4 @@
-//! `pp-nvim` — expose pp's index & search functions for Neovim.
+//! `pp-nvim` — expose pp's cache & search functions for Neovim.
 //!
 //! Two layers:
 //!
@@ -16,11 +16,11 @@ pub use pp::{Config, cache_paths, get_cache_path, get_config_path, load_config};
 /// Result type re-exported for convenience.
 pub type Result<T> = pp::Result<T>;
 
-/// Rebuild the index from scratch; returns the number of indexed repositories.
+/// Rebuild the cache from scratch; returns the number of cached repositories.
 ///
 /// # Errors
 ///
-/// Returns an error when the cache directory or index path cannot be
+/// Returns an error when the cache directory or cache path cannot be
 /// resolved, or when the rebuild fails (see [`pp::reindex`]).
 pub fn rebuild_index() -> Result<usize> {
     let config = pp::load_config();
@@ -29,7 +29,7 @@ pub fn rebuild_index() -> Result<usize> {
     Ok(repos.len())
 }
 
-/// List all indexed repositories (auto-rebuilds the index if missing or stale).
+/// List all cached repositories (auto-rebuilds the cache if missing or stale).
 ///
 /// # Errors
 ///
@@ -38,7 +38,11 @@ pub fn rebuild_index() -> Result<usize> {
 pub fn list_repos() -> Result<Vec<String>> {
     let config = pp::load_config();
     let (cache_dir, db_path) = pp::cache_paths()?;
-    pp::get_repos(&config, &cache_dir, &db_path, false)
+    Ok(pp::get_repos(&config, &cache_dir, &db_path, false)?
+        .paths()
+        .into_iter()
+        .map(str::to_string)
+        .collect())
 }
 
 /// List repositories with a live scan, bypassing the cache.
@@ -49,7 +53,11 @@ pub fn list_repos() -> Result<Vec<String>> {
 pub fn fresh_repos() -> Result<Vec<String>> {
     let config = pp::load_config();
     let (cache_dir, db_path) = pp::cache_paths()?;
-    pp::get_repos(&config, &cache_dir, &db_path, true)
+    Ok(pp::get_repos(&config, &cache_dir, &db_path, true)?
+        .paths()
+        .into_iter()
+        .map(str::to_string)
+        .collect())
 }
 
 /// Case-insensitive substring search over the cached repository list.
@@ -64,7 +72,7 @@ pub fn search_repos(query: &str) -> Result<Vec<String>> {
     pp::search_repos(&config, &cache_dir, &db_path, query)
 }
 
-/// The index database path (useful for cache-busting or display on the plugin side).
+/// The cache file path (useful for cache-busting or display on the plugin side).
 ///
 /// # Errors
 ///
@@ -77,7 +85,7 @@ pub fn index_db_path() -> Result<PathBuf> {
 /// FFI bridge for Neovim.
 ///
 /// The repository list is cached in a process-global `RwLock` so per-keystroke
-/// searches never re-read the index file. Every call compares the index file's
+/// searches never re-read the cache file. Every call compares the cache file's
 /// mtime against the cached one and reloads on change, so a reindex performed
 /// by another process (e.g. `pp index` or `:PpIndex`) is picked up lazily.
 pub mod ffi {
@@ -89,7 +97,7 @@ pub mod ffi {
 
     struct Cache {
         repos: Vec<String>,
-        /// mtime of `index.fst` when `repos` was loaded.
+        /// mtime of `pp.cache` when `repos` was loaded.
         db_mtime: Option<SystemTime>,
     }
 
@@ -122,10 +130,14 @@ pub mod ffi {
     fn load_repos() -> Result<Vec<String>> {
         let config = pp::load_config();
         let (cache_dir, db_path) = pp::cache_paths()?;
-        pp::get_repos(&config, &cache_dir, &db_path, false)
+        Ok(pp::get_repos(&config, &cache_dir, &db_path, false)?
+            .paths()
+            .into_iter()
+            .map(str::to_string)
+            .collect())
     }
 
-    /// Cached repository list, (re)loading it when the index file changed or
+    /// Cached repository list, (re)loading it when the cache file changed or
     /// first appeared since the last call.
     fn repos() -> Result<Vec<String>> {
         let current = index_mtime();
@@ -152,7 +164,7 @@ pub mod ffi {
         }
     }
 
-    /// Search the cached repository index.
+    /// Search the cached repository list.
     ///
     /// Returns a heap-allocated, NUL-terminated string holding the matching
     /// full paths (newline-separated; empty when nothing matches), or a null
@@ -181,8 +193,10 @@ pub mod ffi {
                 .to_str()
                 .map_err(|err| format!("invalid UTF-8 query: {err}"))?;
 
+            let owned = repos()?;
+            let paths: Vec<&str> = owned.iter().map(String::as_str).collect();
             let matches = pp::search_matches(
-                &repos()?,
+                &paths,
                 query,
                 mode_from_int(mode),
                 distance,
@@ -242,19 +256,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pp-ffi-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cache = dir.join("cache");
-        let db = cache.join("pp").join("index.fst");
+        let db = cache.join("pp").join("pp.cache");
 
         // One fake repository under a temp root.
         let repo_dir = dir.join("repos").join("alpha-project");
         std::fs::create_dir_all(&repo_dir).unwrap();
         let repo_path = repo_dir.to_string_lossy().into_owned();
 
-        // Write the index directly with fst (rather than pp::reindex) so the
-        // test owns the exact repository list without a live scan.
-        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let mut builder = fst::SetBuilder::new(Vec::<u8>::new()).unwrap();
-        builder.insert(&repo_path).unwrap();
-        std::fs::write(&db, builder.into_inner().unwrap()).unwrap();
+        // Write the cache directly (rather than pp::reindex) so the test owns
+        // the exact repository list without a live scan.
+        pp::write_cache(db.parent().unwrap(), &db, &[repo_path]).unwrap();
 
         // SAFETY: the test process owns these env vars; no other thread reads
         // them before the FFI cache is initialised below.

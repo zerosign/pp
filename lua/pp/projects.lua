@@ -1,4 +1,4 @@
--- pp.nvim — data layer: talks to the `pp` CLI (cached fst index).
+-- pp.nvim — data layer: talks to the `pp` CLI (memory-mapped rkyv cache).
 --
 -- Mirrors the Rust `pp` lib surface (get_repos / scan_repos / reindex / clear),
 -- so this module is the Lua counterpart of the core crate. No UI here.
