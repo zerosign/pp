@@ -4,12 +4,12 @@ A fast, lightweight repository locator and project switcher with a Rust core and
 
 ## Architecture
 
-- **pp CLI**: Scans configured roots for git/project repositories, maintains an `fst`-backed cache, and exposes fast `index`, `list`, `search`, and `clear` commands.
+- **pp CLI**: Scans configured roots for git/project repositories, maintains a memory-mapped `rkyv` cache, and exposes fast `index`, `list`, `search`, and `clear` commands.
 - **pp.nvim**: Neovim plugin providing `:PpProject`, `:PpSwitch`, and `:PpSearch`. Runs per-keystroke fuzzy matching directly in Rust via a LuaJIT FFI cdylib (`libpp_nvim.so`) with automatic `fzf-lua` fallback.
 
 ```
 lua/pp/picker.lua ── ffi.load ──▶ build/libpp_nvim.so ──▶ crates/pp-nvim ──▶ crates/pp
-      (UI only)                  (cdylib FFI bridge)      (pure-Rust API)     (core: scan/index/search)
+      (UI only)                  (cdylib FFI bridge)      (pure-Rust API)     (core: scan/cache/search)
 lua/pp/projects.lua ── vim.system ──▶ pp CLI binary (data layer)
 ```
 
@@ -23,7 +23,7 @@ pp list          # Print indexed repositories (--no-cache for a live scan)
 pp search <q>    # Fast CLI search (--mode substring|prefix|fuzzy|subseq, --limit N)
 pp clear         # Clear the index cache
 pp generate <sh> # Generate shell completion scripts (fish, bash, zsh)
-pp               # Default: print list (pipe to skim/fzf in shell wrappers)
+pp               # Interactive picker (fuzzy-matches any path component; "/" for a whole-path query)
 ```
 
 ---
@@ -71,7 +71,7 @@ Requires Rust (`cargo`) and [`just`](https://github.com/casey/just).
 
 ```sh
 just install         # Installs release binary to ~/.local/bin/pp + fish wrapper + completions
-just install-static  # Installs static musl + mimalloc binary to ~/.local/bin/pp
+just install-static  # Installs static musl binary to ~/.local/bin/pp
 pp index             # Build repository index once
 ```
 
@@ -102,7 +102,7 @@ On installation or update, `lazy.nvim` executes `build_native()` to compile `lib
 just build-nvim-native    # Build FFI cdylib (native) -> build/libpp_nvim.so
 just nvim-portable        # Build FFI cdylib (portable x86-64)
 just clippy               # Run pedantic clippy lints
-cargo test --workspace    # Run all Rust unit and integration tests (13 tests)
+cargo test --workspace    # Run all Rust unit and integration tests (22 tests)
 just test-lua             # Run sandboxed Lua tests and LuaJIT trace audits
 ```
 
@@ -110,7 +110,7 @@ just test-lua             # Run sandboxed Lua tests and LuaJIT trace audits
 
 ## How It Works
 
-- **Indexing**: `pp` maintains an immutable `fst::Set` of absolute paths under configured root directories (configurable in `~/.config/pp/config.toml`). A detected repository is a leaf by default; subtrees listed in `nested_projects` are descended past instead, so nested repositories inside them are indexed too.
-- **Search & Ranking**: Matches are ranked per keystroke: exact basename matches first, followed by prefix, substring, and subsequence matches.
+- **Caching**: `pp` maintains an immutable, memory-mapped `rkyv` archive of absolute paths under configured root directories (configurable in `~/.config/pp/config.toml`). The archive is read zero-copy, so the picker borrows paths straight out of the mapping. A detected repository is a leaf by default; subtrees listed in `nested_projects` are descended past instead, so nested repositories inside them are indexed too.
+- **Search & Ranking**: Search (`pp search` / `:PpSearch`) ranks per mode — `fuzzy` by edit distance; otherwise an exact basename match, then a basename prefix, then the rest. The interactive `pp` picker scores every path component, so any directory in the path can match (a query containing `/` matches the whole path).
 - **FFI Performance**: The Neovim floating UI passes queries to `libpp_nvim.so` via LuaJIT FFI. Matching runs entirely in compiled C/Rust code; Lua only renders the resulting lines to the buffer.
-- **Automatic Cache Invalidation**: The FFI layer monitors `index.fst` modification timestamps on disk and reloads instantly when reindexed by another process.
+- **Automatic Cache Invalidation**: The FFI layer monitors `pp.cache` modification timestamps on disk and reloads instantly when reindexed by another process.

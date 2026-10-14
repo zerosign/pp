@@ -14,8 +14,8 @@ CONTENTS                                                         *pp-contents*
 
 pp.nvim is a Neovim plugin for instantly switching project workspaces. It is
 powered by `pp`, a fast repository locator written in Rust that scans your
-roots (`~/Repositories` by default), indexes git and project markers into an
-fst set, and provides per-keystroke fuzzy filtering.
+roots (`~/Repositories` by default), indexes git and project markers into a
+memory-mapped cache, and provides per-keystroke fuzzy filtering.
 
 Search executes inside a compiled Rust cdylib (`libpp_nvim.so`) via LuaJIT
 FFI, rendering floating picker matches with zero latency. If the shared library
@@ -36,7 +36,7 @@ is missing, it automatically falls back to `fzf-lua`.
     - `substring` (default): Case-insensitive substring matching
     - `fuzzy`: Levenshtein edit-distance matching
     - `prefix`: Matching path basenames by prefix
-    - `subseq`: Subsequence matching across full path
+    - `subseq`: Subsequence matching over the basename
 
 *:PpIndex*
     Asynchronously rebuild the repository index.

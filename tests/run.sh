@@ -37,7 +37,7 @@ mkdir -p "$SB/home/Repositories/work" \
 #   k6            -> exact basename
 #   k6-operator   -> basename prefix
 #   notk6         -> basename contains (other)
-#   work/k6-thing -> path contains (other)
+#   work/k6-thing -> basename prefix
 #   zebra         -> unrelated filler
 mkrepo() { mkdir -p "$1/.git"; }
 mkrepo "$SB/home/Repositories/k6"
