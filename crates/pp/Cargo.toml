@@ -3,11 +3,12 @@ name = "pp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared core for pp: repository index & search"
+description = "Shared core for pp: repository cache & search"
 
 [dependencies]
 directories.workspace = true
-fst.workspace = true
+memmap2.workspace = true
+rkyv.workspace = true
 serde.workspace = true
 toml.workspace = true
 

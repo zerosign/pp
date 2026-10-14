@@ -1,26 +1,29 @@
 //! `pp` — shared core for the pp repository locator.
 //!
-//! This crate holds only the *index & search* logic: config loading, root
-//! scanning, and the cache. The interactive UI (skim picker) lives in
+//! This crate holds only the *cache & search* logic: config loading, root
+//! scanning, and the on-disk cache. The interactive UI (fuzzy picker) lives in
 //! `pp-cli`, and nvim-facing wrappers live in `pp-nvim`.
 //!
-//! # Index format
+//! # Cache format
 //!
-//! The cache is an immutable [`fst::Set`] of repository paths, built from
-//! sorted input and swapped into place atomically (temp file + rename). It is
-//! memmapped-free by design: the file is tiny, so reads just load it into
-//! memory. Because the set is immutable, any number of readers (CLI + nvim
-//! simultaneously) can access it without coordination, and a rebuild never
-//! disturbs an in-flight read.
+//! The cache is an [`rkyv`]-serialized `RepoCache` — a magic tag, a format
+//! version, and a `Vec<String>` of repository paths — written atomically via a
+//! temp file + rename. It is **memmapped** on read and accessed zero-copy:
+//! [`Cache`] hands out borrowed `&str`s straight out of the mapping, so no
+//! per-path allocation or UTF-8 validation happens on the hot path. Because
+//! the archive is immutable and swapped by rename, any number of readers
+//! (CLI + nvim simultaneously) share it, and a rebuild never disturbs an
+//! in-flight read.
 //!
 //! # Access modes
 //!
-//! - [`reindex`] — write path: scan roots and persist the index.
-//! - [`read_index`] — read path: load the cached set.
+//! - [`reindex`] — write path: scan roots and persist the cache.
+//! - `Cache::open` — read path: mmap and validate the cached archive.
 //! - [`get_repos`] — convenience accessor that auto-rebuilds a missing,
-//!   stale, or unreadable index.
+//!   stale, or unreadable cache.
 
-use fst::{Set, SetBuilder};
+use memmap2::Mmap;
+use rkyv::string::ArchivedString;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -156,7 +159,7 @@ pub fn get_cache_path() -> Option<PathBuf> {
         })
 }
 
-/// Resolve the cache directory and the index database path.
+/// Resolve the cache directory and the cache file path.
 ///
 /// # Errors
 ///
@@ -164,7 +167,113 @@ pub fn get_cache_path() -> Option<PathBuf> {
 /// environment.
 pub fn cache_paths() -> Result<(PathBuf, PathBuf)> {
     let cache_dir = get_cache_path().ok_or("Could not determine cache directory")?;
-    Ok((cache_dir.clone(), cache_dir.join("index.fst")))
+    Ok((cache_dir.clone(), cache_dir.join("pp.cache")))
+}
+
+/// Magic tag at the start of every cache file.
+const CACHE_MAGIC: [u8; 8] = *b"PPCACHE\0";
+
+/// Cache format version; bump to invalidate caches written by older versions.
+const CACHE_VERSION: u32 = 1;
+
+/// The archived root of a cache file.
+#[derive(rkyv::Archive, rkyv::Serialize)]
+struct RepoCache {
+    magic: [u8; 8],
+    version: u32,
+    repos: Vec<String>,
+}
+
+/// A read-only view of the repository list.
+///
+/// Normally this is a memmapped cache file; after a `--no-cache` live scan it
+/// owns the list in memory instead. Either way [`Cache::paths`] borrows the
+/// underlying strings, so a picker or search can consume them without copying.
+pub struct Cache {
+    inner: CacheInner,
+}
+
+enum CacheInner {
+    Mapped(Mmap),
+    Owned(Vec<String>),
+}
+
+impl Cache {
+    /// Open a cache file, memmapping it for zero-copy reads.
+    ///
+    /// Validates the archive once (magic + version); later reads use the
+    /// unchecked accessor against the immutable mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be opened or mapped, is not a
+    /// valid rkyv archive, or carries an unexpected magic/version.
+    fn open(db_path: &Path) -> Result<Self> {
+        let file = fs::File::open(db_path)?;
+        // SAFETY: a cache file is only ever replaced by an atomic rename; pp
+        // never mutates one in place, so this mapping cannot be truncated
+        // underneath a live read.
+        let map = unsafe { Mmap::map(&file)? };
+        let archived = rkyv::access::<ArchivedRepoCache, rkyv::rancor::Error>(&map)
+            .map_err(|err| format!("unreadable cache: {err}"))?;
+        if archived.magic != CACHE_MAGIC || archived.version.to_native() != CACHE_VERSION {
+            return Err("cache format mismatch".into());
+        }
+        Ok(Self {
+            inner: CacheInner::Mapped(map),
+        })
+    }
+
+    /// A cache backed by an in-memory list (used by `--no-cache`).
+    fn owned(repos: Vec<String>) -> Self {
+        Self {
+            inner: CacheInner::Owned(repos),
+        }
+    }
+
+    /// The archived root, re-derived from the mapping.
+    ///
+    /// [`Cache::open`] already ran the checked accessor and the mapping is
+    /// never mutated, so re-reading it here is sound.
+    fn archived(&self) -> &ArchivedRepoCache {
+        let CacheInner::Mapped(map) = &self.inner else {
+            unreachable!("archived() is only valid for mapped caches");
+        };
+        // SAFETY: validated in `open`; the underlying bytes are immutable.
+        unsafe { rkyv::access_unchecked::<ArchivedRepoCache>(map) }
+    }
+
+    /// Number of repositories in the cache.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match &self.inner {
+            CacheInner::Mapped(_) => self.archived().repos.len(),
+            CacheInner::Owned(repos) => repos.len(),
+        }
+    }
+
+    /// Whether the cache holds no repositories.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Borrow every repository path, in stored (sorted) order.
+    ///
+    /// For a mapped cache the returned `&str`s point straight into the mmap;
+    /// the `Vec` is a scratch buffer of pointers, not string copies.
+    #[must_use]
+    pub fn paths(&self) -> Vec<&str> {
+        match &self.inner {
+            CacheInner::Mapped(_) => self
+                .archived()
+                .repos
+                .iter()
+                .map(ArchivedString::as_str)
+                .collect(),
+            CacheInner::Owned(repos) => repos.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 /// Expand `~` and anchor relative paths to `home`.
@@ -314,48 +423,61 @@ fn is_stale(db_path: &Path, config: &Config) -> bool {
         .is_some_and(|age| age > Duration::from_secs(config.index_ttl_days * 86400))
 }
 
-/// Write path: scan roots and persist the index as an immutable [`fst::Set`].
+/// Serialize repository paths to the cache file.
 ///
-/// Returns the sorted list of indexed repositories. The set is written to a
-/// per-process temp file and atomically renamed into place, so concurrent
-/// readers keep seeing the previous index until the swap. A stale `index.db`
-/// left over from the old redb-backed format is removed on success.
+/// The list is sorted and de-duplicated before writing. The archive goes to a
+/// per-process temp file and is atomically renamed into place, so concurrent
+/// readers keep seeing the previous cache until the swap. A plain `Vec<String>`
+/// is enough because rkyv needs no sorted-key structure — unlike the old `fst`
+/// set, ordering is a display convenience, not a storage requirement.
 ///
 /// # Errors
 ///
-/// Returns an error when the cache directory cannot be created, the fst cannot
-/// be built, or the temp file cannot be written or renamed into place.
-pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<String>> {
-    let start = Instant::now();
-    eprintln!("Scanning repositories to build index...");
-
-    let repo_strings = to_sorted_strings(scan_repos(config));
+/// Returns an error when the cache directory cannot be created, the archive
+/// cannot be serialized, or the temp file cannot be written or renamed.
+pub fn write_cache(cache_dir: &Path, db_path: &Path, repos: &[String]) -> Result<()> {
     fs::create_dir_all(cache_dir)?;
 
     let file_name = db_path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("index.fst");
-
+        .unwrap_or("pp.cache");
     let tmp_path = db_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
 
-    let mut builder = SetBuilder::new(Vec::<u8>::new())?;
-    
-    for repo in &repo_strings {
-        builder.insert(repo)?;
-    }
+    let mut sorted = repos.to_vec();
+    sorted.sort();
+    sorted.dedup();
 
-    fs::write(&tmp_path, builder.into_inner()?)?;
+    let cache = RepoCache {
+        magic: CACHE_MAGIC,
+        version: CACHE_VERSION,
+        repos: sorted,
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cache)?;
+
+    fs::write(&tmp_path, &bytes[..])?;
     fs::rename(&tmp_path, db_path)?;
+    Ok(())
+}
 
-    // Clean up the legacy redb-format cache if it is still around.
-    let legacy_db = db_path.with_file_name("index.db");
-    if legacy_db.exists() {
-        let _ = fs::remove_file(legacy_db);
-    }
+/// Write path: scan roots and persist the cache.
+///
+/// Returns the sorted list of cached repositories. Only this cache file is
+/// written; a stale `index.fst`/`index.db` from an older format is left in
+/// place rather than deleted, so switching between versions stays reversible.
+///
+/// # Errors
+///
+/// Returns an error when the scan result cannot be written (see [`write_cache`]).
+pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<String>> {
+    let start = Instant::now();
+    eprintln!("Scanning repositories to build cache...");
+
+    let repo_strings = to_sorted_strings(scan_repos(config));
+    write_cache(cache_dir, db_path, &repo_strings)?;
 
     eprintln!(
-        "Indexed {} repositories in {:.2?}.",
+        "Cached {} repositories in {:.2?}.",
         repo_strings.len(),
         start.elapsed()
     );
@@ -363,48 +485,38 @@ pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<
     Ok(repo_strings)
 }
 
-/// Read path: load the cached repository set (already sorted & de-duplicated).
-///
-/// # Errors
-///
-/// Returns an error when the index file cannot be read or parsed as an fst.
-pub fn read_index(db_path: &Path) -> Result<Vec<String>> {
-    let set = Set::new(fs::read(db_path)?)?;
-    Ok(set.stream().into_strs()?)
-}
-
-/// The state of the on-disk index; decides between serving from cache and
+/// The state of the on-disk cache; decides between serving from cache and
 /// rebuilding in [`get_repos`].
-enum IndexState {
-    /// No index file exists yet.
+enum CacheState {
+    /// No cache file exists yet.
     Missing,
-    /// The index is older than the configured TTL.
+    /// The cache is older than the configured TTL.
     Stale,
-    /// The index exists but cannot be parsed.
+    /// The cache exists but is not a valid archive for this version.
     Unreadable,
-    /// The index is current and was loaded successfully.
-    Ready(Vec<String>),
+    /// The cache is current and was mapped successfully.
+    Ready(Cache),
 }
 
-/// Classify the on-disk index, loading it when it looks usable.
-fn index_state(db_path: &Path, config: &Config) -> IndexState {
+/// Classify the on-disk cache, mapping it when it looks usable.
+fn cache_state(db_path: &Path, config: &Config) -> CacheState {
     if !db_path.exists() {
-        return IndexState::Missing;
+        return CacheState::Missing;
     }
     if is_stale(db_path, config) {
-        return IndexState::Stale;
+        return CacheState::Stale;
     }
-    match read_index(db_path) {
-        Ok(repos) => IndexState::Ready(repos),
-        Err(_) => IndexState::Unreadable,
+    match Cache::open(db_path) {
+        Ok(cache) => CacheState::Ready(cache),
+        Err(_) => CacheState::Unreadable,
     }
 }
 
-/// Get the sorted repository list.
+/// Get the repository list as a [`Cache`] (borrowed paths, not copies).
 ///
 /// - `no_cache` — always live-scan (`scan_repos`).
-/// - otherwise the index state decides: a missing, stale, or unreadable index
-///   is rebuilt via the write path; a current one is served from cache.
+/// - otherwise the cache state decides: a missing, stale, or unreadable cache
+///   is rebuilt via the write path; a current one is memmapped.
 ///
 /// # Errors
 ///
@@ -414,28 +526,33 @@ pub fn get_repos(
     cache_dir: &Path,
     db_path: &Path,
     no_cache: bool,
-) -> Result<Vec<String>> {
+) -> Result<Cache> {
     if no_cache {
-        return Ok(to_sorted_strings(scan_repos(config)));
+        return Ok(Cache::owned(to_sorted_strings(scan_repos(config))));
     }
-    match index_state(db_path, config) {
-        IndexState::Missing => reindex(config, cache_dir, db_path),
-        IndexState::Stale => {
-            eprintln!("Index is stale, rebuilding...");
-            reindex(config, cache_dir, db_path)
+    match cache_state(db_path, config) {
+        CacheState::Ready(cache) => Ok(cache),
+        CacheState::Missing => {
+            reindex(config, cache_dir, db_path)?;
+            Cache::open(db_path)
         }
-        IndexState::Unreadable => {
-            eprintln!("Index is unreadable, rebuilding...");
-            reindex(config, cache_dir, db_path)
+        CacheState::Stale => {
+            eprintln!("Cache is stale, rebuilding...");
+            reindex(config, cache_dir, db_path)?;
+            Cache::open(db_path)
         }
-        IndexState::Ready(repos) => Ok(repos),
+        CacheState::Unreadable => {
+            eprintln!("Cache is unreadable, rebuilding...");
+            reindex(config, cache_dir, db_path)?;
+            Cache::open(db_path)
+        }
     }
 }
 
 /// Search modes supported by [`search`]. All modes are case-insensitive.
 ///
-/// Matching is done in memory over the loaded repository list; the fst cache
-/// is used purely as storage.
+/// Matching is done in memory over the borrowed repository list; the cache is
+/// used purely as storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
     /// Case-insensitive substring match over the full path.
@@ -564,21 +681,23 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 
 /// Search an already-loaded repository list.
 ///
-/// The core of [`search`] split out so callers that hold their own cached list
-/// (notably the nvim FFI bridge) can search without re-reading the index.
-/// Results are ranked (fuzzy by edit distance; otherwise exact basename,
-/// basename prefix, then the rest) and returned in sorted order.
-pub fn search_matches(
-    repos: &[String],
+/// The core of [`search`] split out so callers that hold their own cached
+/// [`Cache`] (notably the picker and the nvim FFI bridge) can search borrowed
+/// paths without re-reading or re-allocating the list. Results are ranked
+/// (fuzzy by edit distance; otherwise exact basename, basename prefix, then the
+/// rest) and returned in sorted order.
+#[must_use]
+pub fn search_matches<'a>(
+    repos: &[&'a str],
     query: &str,
     mode: SearchMode,
     distance: u32,
     limit: Option<usize>,
-) -> Vec<String> {
+) -> Vec<&'a str> {
     let query_lower = query.to_lowercase();
-    let mut matched: Vec<(u8, &str)> = repos
+    let mut matched: Vec<(u8, &'a str)> = repos
         .iter()
-        .map(String::as_str)
+        .copied()
         .filter_map(|repo| mode.score(repo, &query_lower, distance).map(|score| (score, repo)))
         .collect();
 
@@ -586,7 +705,7 @@ pub fn search_matches(
     matched
         .into_iter()
         .take(limit.unwrap_or(usize::MAX))
-        .map(|(_, repo)| repo.to_string())
+        .map(|(_, repo)| repo)
         .collect()
 }
 
@@ -594,6 +713,10 @@ pub fn search_matches(
 ///
 /// `distance` only applies to [`SearchMode::Fuzzy`]; `limit` caps the number
 /// of returned results (`None` for unlimited).
+///
+/// This returns owned `String`s for callers that need to outlive the cache
+/// (e.g. the nvim FFI bridge). Prefer [`search_matches`] with a borrowed
+/// [`Cache::paths`] view when the cache stays in scope.
 ///
 /// # Errors
 ///
@@ -608,13 +731,11 @@ pub fn search(
     distance: u32,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    Ok(search_matches(
-        &get_repos(config, cache_dir, db_path, false)?,
-        query,
-        mode,
-        distance,
-        limit,
-    ))
+    let cache = get_repos(config, cache_dir, db_path, false)?;
+    Ok(search_matches(&cache.paths(), query, mode, distance, limit)
+        .into_iter()
+        .map(str::to_string)
+        .collect())
 }
 
 /// Search the cached repository list for paths containing `query`
@@ -646,8 +767,8 @@ mod tests {
         "/home/u/Repos/rust-pp",
     ];
 
-    fn repos() -> Vec<String> {
-        REPOS.iter().map(|s| (*s).to_string()).collect()
+    fn repos() -> Vec<&'static str> {
+        REPOS.to_vec()
     }
 
     #[test]
@@ -936,5 +1057,40 @@ mod tests {
         assert_eq!(found, expected);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn cache_round_trips_through_rkyv() {
+        let dir = std::env::temp_dir().join(format!("pp-cache-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache_dir = dir.join("cache");
+        let db = cache_dir.join("pp.cache");
+        let owned: Vec<String> = REPOS.iter().map(|s| (*s).to_string()).collect();
+
+        write_cache(&cache_dir, &db, &owned).unwrap();
+        let cache = Cache::open(&db).unwrap();
+
+        let mut expected = owned.clone();
+        expected.sort();
+        assert_eq!(
+            cache.paths(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(!cache.is_empty());
+
+        // A current cache is served as-is by get_repos (no live scan needed),
+        // even when the configured roots are empty.
+        let config = Config {
+            roots: Vec::new(),
+            ..Config::default()
+        };
+        let served = get_repos(&config, &cache_dir, &db, false).unwrap();
+        assert_eq!(served.len(), REPOS.len());
+
+        // Corrupt bytes are rejected instead of being read as garbage.
+        std::fs::write(&db, b"not an rkyv archive").unwrap();
+        assert!(Cache::open(&db).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
