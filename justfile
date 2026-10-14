@@ -19,7 +19,7 @@ default: build
 build:
     cargo build --release
 
-# Build static binary via musl + mimalloc
+# Build static binary via musl
 build-static:
     cargo build --release --target {{TARGET}} -p pp-cli
 
@@ -51,11 +51,11 @@ test-lua:
 install: build install-bin install-fish install-completions
     @echo "✓ pp installed — restart your shell or: source {{fish_func_dir}}/pp.fish"
 
-# Build and install static musl + mimalloc binary + shell integrations
+# Build and install static musl binary + shell integrations
 install-static: build-static
     @mkdir -p {{install_dir}}
     cp -f {{ROOT}}/target/{{TARGET}}/release/{{bin_name}} {{install_dir}}/{{bin_name}}
-    @echo "✓ Static binary (musl + mimalloc) → {{install_dir}}/{{bin_name}}"
+    @echo "✓ Static binary (musl) → {{install_dir}}/{{bin_name}}"
     @just install-fish
     @just install-completions
     @echo "✓ pp static installed — restart your shell or: source {{fish_func_dir}}/pp.fish"

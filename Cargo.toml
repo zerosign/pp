@@ -14,7 +14,8 @@ license = "MIT"
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 directories = "6.0"
-fst = "0.4"
-dialoguer = { version = "0.12", default-features = false, features = ["fuzzy-select"] }
+rkyv = { version = "0.8", features = ["unaligned"] }
+memmap2 = "0.9"
+console = "0.16"
+fuzzy-matcher = "0.3"
 usage = { package = "usage-rs", version = "6", features = ["completions"] }
-mimalloc = "0.1"
