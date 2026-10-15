@@ -154,6 +154,12 @@ local HINTS = '↑↓/jk select · Enter open · Esc close · C-f mode'
 local NS = vim.api.nvim_create_namespace('pp-selection')
 local NS_PROMPT = vim.api.nvim_create_namespace('pp-prompt')
 
+-- One clearable group owns every autocmd the picker registers, so teardown is
+-- deterministic. The buffer-scoped TextChanged hooks die with the buffer, but
+-- the window-scoped WinClosed hook does not; clearing the group in reset_state
+-- frees both in one shot, and `clear = true` makes re-load idempotent.
+local AUG = vim.api.nvim_create_augroup('pp_picker', { clear = true })
+
 -- Selection highlight. Linked to Visual so it follows the active colorscheme;
 -- a colorscheme that defines PpSelection itself takes precedence.
 if vim.tbl_isempty(vim.api.nvim_get_hl(0, { name = 'PpSelection' })) then
@@ -191,6 +197,10 @@ local function reset_state()
     state.timer:close()
     state.timer = nil
   end
+  -- Drop the picker's autocmds deterministically. The buffer-scoped
+  -- TextChanged hooks would die with the buffer anyway; the window-scoped
+  -- WinClosed hook would otherwise linger until its window closed.
+  vim.api.nvim_clear_autocmds({ group = AUG })
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
@@ -393,6 +403,7 @@ local function open_float(opts)
   -- free the timer and scratch buffer; otherwise every such close would strand
   -- a hidden buffer + autocmds and leak a little on each picker open.
   vim.api.nvim_create_autocmd('WinClosed', {
+    group = AUG,
     pattern = tostring(win),
     once = true,
     callback = function()
@@ -424,6 +435,7 @@ local function open_float(opts)
   })
 
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChanged' }, {
+    group = AUG,
     buffer = buf,
     callback = schedule_search,
   })

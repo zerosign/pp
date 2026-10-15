@@ -17,6 +17,7 @@ package.path = root_dir .. '/lua/?.lua;' .. package.path
 -- Minimal vim.* stub: just enough for picker.lua to load and run headless.
 -- ---------------------------------------------------------------------------
 local NS_ID = 0
+local AUG_ID = 0
 local stub_buf = { lines = { '' } } -- buffer line storage (1-based rows)
 
 local api = {}
@@ -57,6 +58,11 @@ function api.nvim_get_hl()
   return { link = 'Visual' }
 end
 function api.nvim_create_autocmd() end
+function api.nvim_create_augroup()
+  AUG_ID = AUG_ID + 1
+  return AUG_ID
+end
+function api.nvim_clear_autocmds() end
 function api.nvim_win_close() end
 function api.nvim_buf_delete() end
 
