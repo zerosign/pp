@@ -178,20 +178,28 @@ local function next_mode(current)
   return MODE_ORDER[1]
 end
 
-local function close_float()
+--- Free the picker's per-session resources (debounce timer, scratch buffer,
+--- state) without touching the window. Split out from `close_float` because a
+--- `WinClosed` handler runs while the window is already gone, so closing it
+--- again would be both redundant and invalid.
+local function reset_state()
   if state.timer then
     state.timer:stop()
     state.timer:close()
     state.timer = nil
-  end
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.api.nvim_win_close(state.win, true)
   end
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
   state.win, state.buf = nil, nil
   state.results, state.cursor, state.offset = {}, 1, 1
+end
+
+local function close_float()
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.api.nvim_win_close(state.win, true)
+  end
+  reset_state()
 end
 
 local function current_query()
@@ -338,6 +346,12 @@ local function cancel()
 end
 
 local function open_float(opts)
+  -- Re-entrancy guard: if a picker is already open (double keypress, a
+  -- programmatic `pick`, or one left behind when its window was closed by
+  -- something other than accept/cancel), tear it down first so its window,
+  -- buffer, autocmds and debounce timer can never be stranded.
+  close_float()
+
   local width = math.min(math.floor(vim.o.columns * 0.6), 100)
   local height = 14
   local row = math.max(1, math.floor((vim.o.lines - height) / 2))
@@ -363,6 +377,20 @@ local function open_float(opts)
   })
 
   state.buf, state.win = buf, win
+
+  -- Closing the float by anything other than accept/cancel (an external
+  -- `:close`, a `WinClosed`-driven autocmd, a config reload, ...) must still
+  -- free the timer and scratch buffer; otherwise every such close would strand
+  -- a hidden buffer + autocmds and leak a little on each picker open.
+  vim.api.nvim_create_autocmd('WinClosed', {
+    pattern = tostring(win),
+    once = true,
+    callback = function()
+      if state.win == win then
+        reset_state()
+      end
+    end,
+  })
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
 

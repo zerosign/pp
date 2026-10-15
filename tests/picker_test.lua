@@ -141,4 +141,55 @@ config.setup({}) -- restore defaults
 local default_fn = picker.get_files()
 assert(type(default_fn) == 'function', 'default files_picker returns built-in "dir" provider')
 
+-- 8. Re-opening must never strand the previous float ---------------------------
+-- Regression: open_float used to overwrite state.buf/state.win without closing
+-- them, so every re-open (double keypress, programmatic pick, or a float closed
+-- by something other than accept/cancel) orphaned a buffer + window + its
+-- autocmds and crept up in memory.
+local function totals()
+  return #api.nvim_list_bufs(), #api.nvim_list_wins(), #api.nvim_get_autocmds({})
+end
+local rb0, rw0, ra0 = totals()
+for _ = 1, 20 do
+  picker.pick({ prompt = 'test> ', on_select = function() end })
+  picker.pick({ prompt = 'test> ', on_select = function() end }) -- re-open while open
+  picker._debug.cancel()
+end
+local rb1, rw1, ra1 = totals()
+assert(
+  rb1 == rb0 and rw1 == rw0 and ra1 == ra0,
+  string.format(
+    're-open leaked: bufs %d->%d wins %d->%d acmds %d->%d',
+    rb0,
+    rb1,
+    rw0,
+    rw1,
+    ra0,
+    ra1
+  )
+)
+
+-- 9. Closing the float externally still frees the buffer + timer (WinClosed) ----
+local eb0, ew0, ea0 = totals()
+for _ = 1, 20 do
+  picker.pick({ prompt = 'test> ', on_select = function() end })
+  local w = picker._debug.state.win
+  if w and api.nvim_win_is_valid(w) then
+    api.nvim_win_close(w, true) -- no cancel(): rely on the WinClosed handler
+  end
+end
+local eb1, ew1, ea1 = totals()
+assert(
+  eb1 == eb0 and ew1 == ew0 and ea1 == ea0,
+  string.format(
+    'external close leaked: bufs %d->%d wins %d->%d acmds %d->%d',
+    eb0,
+    eb1,
+    ew0,
+    ew1,
+    ea0,
+    ea1
+  )
+)
+
 print('PICKER TEST PASSED')
