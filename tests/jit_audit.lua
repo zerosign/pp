@@ -80,6 +80,11 @@ _G.vim = {
       return {}
     end,
   }),
+  bo = setmetatable({}, {
+    __index = function()
+      return {}
+    end,
+  }),
   o = { columns = 200, lines = 50 },
   log = { levels = { ERROR = 4, WARN = 3, INFO = 2 } },
   keymap = { set = noop },

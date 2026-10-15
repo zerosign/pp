@@ -367,6 +367,13 @@ local function open_float(opts)
 
   local buf = vim.api.nvim_create_buf(false, true)
 
+  -- The float is a plugin-owned, insert-only results pane that is rewritten by
+  -- API on every keystroke; undo is meaningless in it. Left at the default
+  -- (1000), nvim maintains a per-buffer undo header (and its extmark-undo log)
+  -- for the buffer's whole lifetime, so every write allocates an undo save.
+  -- Buffer-local -1 opts out entirely, dropping that per-keystroke work.
+  vim.bo[buf].undolevels = -1
+
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
