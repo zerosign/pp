@@ -5,7 +5,7 @@ A fast, lightweight repository locator and project switcher with a Rust core and
 ## Architecture
 
 - **pp CLI**: Scans configured roots for git/project repositories, maintains a memory-mapped `rkyv` cache, and exposes fast `index`, `list`, `search`, and `clear` commands.
-- **pp.nvim**: Neovim plugin providing `:PpProject`, `:PpSwitch`, and `:PpSearch`. Runs per-keystroke fuzzy matching directly in Rust via a LuaJIT FFI cdylib (`libpp_nvim.so`) with automatic `fzf-lua` fallback.
+- **pp.nvim**: Neovim plugin providing `:PpProject`, `:PpSwitch`, and `:PpSearch`. Runs per-keystroke fuzzy matching directly in Rust via a LuaJIT FFI cdylib (`libpp_nvim.so`) with automatic `vim.ui.select` fallback.
 
 ```
 lua/pp/picker.lua ── ffi.load ──▶ build/libpp_nvim.so ──▶ crates/pp-nvim ──▶ crates/pp
@@ -92,7 +92,7 @@ return {
 }
 ```
 
-On installation or update, `lazy.nvim` executes `build_native()` to compile `libpp_nvim.so` tuned specifically for your CPU (`-C target-cpu=native`). If `cargo` is unavailable or the library is missing, `pp.nvim` automatically falls back to `fzf-lua`.
+On installation or update, `lazy.nvim` executes `build_native()` to compile `libpp_nvim.so` tuned specifically for your CPU (`-C target-cpu=native`). If `cargo` is unavailable or the library is missing, `pp.nvim` automatically falls back to `vim.ui.select` — so it uses whatever picker you have configured (e.g. snacks).
 
 ---
 

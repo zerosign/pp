@@ -2,11 +2,14 @@
 --
 -- Default: a zero-dependency floating window backed by the pp FFI (cdylib).
 -- Every keystroke runs the search in Rust (`pp_search`); Lua only renders the
--- returned matches, so no competing matcher re-filters the results. Falls
--- back to fzf-lua (full list + fzf's own matcher) when the shared library is
--- missing, and honours `config.options.picker` for a fully custom picker.
+-- returned matches, so no competing matcher re-filters the results. When the
+-- shared library is missing it falls back to `vim.ui.select` — which the user's
+-- picker (snacks, telescope-ui-select, fzf-lua's ui-select, ...) or Neovim's
+-- built-in provides — and honours `config.options.picker` for a fully custom
+-- picker.
 --
--- fzf-lua is still used for the post-selection `files` picker.
+-- The post-selection `files` picker is chosen by `config.options.files_picker`
+-- (built-in `dir` by default; snacks / fzf-lua / telescope / mini.pick opt-in).
 
 local config = require('pp.config')
 local projects = require('pp.projects')
@@ -566,23 +569,15 @@ local function pick_custom(opts)
       custom.pick(list, opts)
       return
     end
-    local ok, fzf = pcall(require, 'fzf-lua')
-    if not ok then
-      util.notify('pp.nvim: fzf-lua is required (or provide custom `opts.picker`)', vim.log.levels.ERROR)
-      return
-    end
-    fzf.fzf_exec(list, {
-      prompt = opts.prompt,
-      winopts = { preview = { hidden = 'hidden' } },
-      actions = {
-        ['default'] = function(selected)
-          if not selected or selected[1] == '' then
-            return
-          end
-          opts.on_select(selected[1])
-        end,
-      },
-    })
+    -- No custom handler (or a bare provider string): defer to `vim.ui.select`,
+    -- which the user's picker wires up (snacks, telescope-ui-select, fzf-lua's
+    -- ui-select, ...) or Neovim's built-in provides. This keeps the fallback
+    -- free of any hard picker dependency.
+    vim.ui.select(list, { prompt = opts.prompt or config.options.prompt }, function(choice)
+      if choice then
+        opts.on_select(choice)
+      end
+    end)
   end)
 end
 
@@ -609,8 +604,8 @@ function M.pick(opts)
   if not warned_fallback then
     warned_fallback = true
     util.notify(
-      'pp.nvim: FFI library not found; falling back to fzf-lua. '
-        .. 'Run `just nvim` in the pp repo to build it.',
+      'pp.nvim: FFI library not found; falling back to vim.ui.select. '
+        .. 'Run `:PpBuild` to build it.',
       vim.log.levels.WARN
     )
   end

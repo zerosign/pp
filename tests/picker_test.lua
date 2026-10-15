@@ -192,4 +192,39 @@ assert(
   )
 )
 
+-- 10. Project-picker fallback is picker-agnostic (vim.ui.select) ---------------
+-- Regression: the FFI-missing / non-custom fallback used to hardcode fzf-lua.
+-- It must defer to vim.ui.select instead, so the user's picker (snacks,
+-- telescope-ui-select, ...) is used and no hard picker dependency is required.
+do
+  local orig_select = vim.ui.select
+  local seen_items, seen_prompt, chosen
+  vim.ui.select = function(items, ui_opts, on_choice)
+    seen_items = items
+    seen_prompt = ui_opts and ui_opts.prompt
+    on_choice(items[2])
+  end
+
+  config.setup({ picker = 'snacks' }) -- a bare provider string => no custom fn
+  picker.pick({
+    prompt = 'fallback> ',
+    on_select = function(p)
+      chosen = p
+    end,
+  })
+  vim.wait(2000, function()
+    return chosen ~= nil
+  end)
+
+  vim.ui.select = orig_select
+  config.setup({}) -- restore defaults
+
+  assert(
+    seen_items and #seen_items == 5,
+    'vim.ui.select got all projects, got ' .. tostring(seen_items and #seen_items)
+  )
+  assert(seen_prompt == 'fallback> ', 'vim.ui.select got the prompt, got ' .. tostring(seen_prompt))
+  assert(chosen == seen_items[2], 'choosing in vim.ui.select drives on_select')
+end
+
 print('PICKER TEST PASSED')

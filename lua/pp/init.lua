@@ -8,7 +8,7 @@
 --   require('pp').clear()                           (:PpClear)
 --
 -- Data/UI split: `projects.lua` is the data layer (CLI), `picker.lua` is the
--- UI layer (FFI float picker by default, fzf-lua fallback). This module wires
+-- UI layer (FFI float picker by default, vim.ui.select fallback). This module wires
 -- them together.
 
 local config = require('pp.config')

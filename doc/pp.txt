@@ -19,7 +19,8 @@ memory-mapped cache, and provides per-keystroke fuzzy filtering.
 
 Search executes inside a compiled Rust cdylib (`libpp_nvim.so`) via LuaJIT
 FFI, rendering floating picker matches with zero latency. If the shared library
-is missing, it automatically falls back to `fzf-lua`.
+is missing, it automatically falls back to `vim.ui.select` (i.e. whatever
+picker you have configured, e.g. snacks).
 
 ==============================================================================
 2. Commands                                                      *pp-commands*
@@ -102,7 +103,8 @@ matching directly in Rust via LuaJIT FFI.
 Building the shared library:
     - Run `:PpBuild` inside Neovim, or `just build-nvim-native` in terminal.
     - Uses `-C target-cpu=native` for maximum performance on your machine.
-    - If `libpp_nvim.so` is missing, `fzf-lua` is used as a transparent fallback.
+    - If `libpp_nvim.so` is missing, `vim.ui.select` is used as a transparent
+      fallback (so your configured picker, e.g. snacks, is used).
 
 ==============================================================================
 vim:tw=78:ts=8:ft=help:norl:
