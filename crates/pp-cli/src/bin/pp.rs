@@ -139,25 +139,37 @@ fn score_path(matcher: &SkimMatcherV2, path: &str, query: &str) -> Option<(i64, 
 /// Matching runs per path component (see [`score_path`]) so a query can name
 /// any directory along the way, not just the repo's own name.
 fn pick_repo(items: &[&str]) -> io::Result<Option<usize>> {
+    use std::fmt::Write as _;
+
+    /// Begin/end synchronized update (DEC private mode 2026).
+    const SYNC_BEGIN: &str = "\x1b[?2026h";
+    const SYNC_END: &str = "\x1b[?2026l";
+
     let term = Term::stderr();
     let matcher = SkimMatcherV2::default();
     let mut query = String::new();
     let mut selected = 0usize;
     let mut filtered: Vec<(usize, (i64, usize))> = Vec::with_capacity(items.len());
+    let mut frame = String::new();
     let mut drawn = 0usize;
+    // Only re-run the matcher when the query changed; arrow keys just redraw.
+    let mut last_query: Option<String> = None;
 
     term.hide_cursor()?;
     let result = loop {
-        filtered.clear();
-        if query.is_empty() {
-            filtered.extend((0..items.len()).map(|index| (index, (0, 0))));
-        } else {
-            filtered.extend(items.iter().enumerate().filter_map(|(index, item)| {
-                score_path(&matcher, item, &query).map(|key| (index, key))
-            }));
-            filtered.sort_unstable_by_key(|&(index, (score, depth))| {
-                (std::cmp::Reverse(score), depth, index)
-            });
+        if last_query.as_deref() != Some(query.as_str()) {
+            filtered.clear();
+            if query.is_empty() {
+                filtered.extend((0..items.len()).map(|index| (index, (0, 0))));
+            } else {
+                filtered.extend(items.iter().enumerate().filter_map(|(index, item)| {
+                    score_path(&matcher, item, &query).map(|key| (index, key))
+                }));
+                filtered.sort_unstable_by_key(|&(index, (score, depth))| {
+                    (std::cmp::Reverse(score), depth, index)
+                });
+            }
+            last_query = Some(query.clone());
         }
 
         if filtered.is_empty() {
@@ -166,19 +178,31 @@ fn pick_repo(items: &[&str]) -> io::Result<Option<usize>> {
             selected = filtered.len() - 1;
         }
 
+        let (term_rows, term_cols) = term.size();
         // One row is the prompt, one is kept free for the final newline.
-        let rows = (term.size().0 as usize).saturating_sub(2).max(1);
+        let rows = (term_rows as usize).saturating_sub(2).max(1);
+        // Rows must never wrap, or the `drawn` line count desyncs from the
+        // screen; reserve two columns for the selection marker.
+        let width = (term_cols as usize).saturating_sub(2).max(1);
         let start = selected.saturating_sub(rows - 1);
         let end = (start + rows).min(filtered.len());
 
+        // Compose the whole frame in memory and emit it with a single write.
+        // Rows are overwritten in place (`\x1b[K` trims leftovers) rather
+        // than blanked first, and the frame is wrapped in synchronized-output
+        // markers (DEC 2026, honoured by tmux ≥ 3.4 and most modern
+        // terminals, ignored elsewhere) so no half-drawn state is shown.
+        frame.clear();
+        frame.push_str(SYNC_BEGIN);
         if drawn > 0 {
-            term.clear_last_lines(drawn)?;
+            let _ = write!(frame, "\x1b[{drawn}A");
         }
-        term.write_line(&format!(
-            "{} repo {}",
+        let _ = writeln!(
+            frame,
+            "\r{} repo {}\x1b[K",
             style("?").green(),
-            style(&query).cyan()
-        ))?;
+            style(console::truncate_str(&query, width.saturating_sub(5), "…")).cyan()
+        );
         drawn = 1;
         for (offset, &(index, _)) in filtered[start..end].iter().enumerate() {
             let marker = if start + offset == selected {
@@ -186,9 +210,17 @@ fn pick_repo(items: &[&str]) -> io::Result<Option<usize>> {
             } else {
                 style(" ")
             };
-            term.write_line(&format!("{marker} {}", items[index]))?;
+            let _ = writeln!(
+                frame,
+                "{marker} {}\x1b[K",
+                console::truncate_str(items[index], width, "…")
+            );
             drawn += 1;
         }
+        // Drop rows left over from a taller previous frame.
+        frame.push_str("\x1b[J");
+        frame.push_str(SYNC_END);
+        term.write_str(&frame)?;
         term.flush()?;
 
         match term.read_key()? {
@@ -213,7 +245,7 @@ fn pick_repo(items: &[&str]) -> io::Result<Option<usize>> {
     };
 
     if drawn > 0 {
-        term.clear_last_lines(drawn)?;
+        term.write_str(&format!("{SYNC_BEGIN}\x1b[{drawn}A\r\x1b[J{SYNC_END}"))?;
     }
     term.show_cursor()?;
     Ok(result)
