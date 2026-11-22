@@ -13,6 +13,9 @@ M.defaults = {
   picker = nil, -- custom project picker: table { pick = fn, files = fn } or function/provider string
   files_picker = 'dir', -- default to built-in Neovim directory viewer ('dir'). Optional plugins: 'fzf-lua', 'snacks', 'telescope', 'mini.pick', 'auto', 'none'
 
+  -- Project root markers (mirrors crates/pp/src/lib.rs default_project_markers)
+  project_markers = { '.git', 'go.mod', 'Cargo.toml', 'package.json' },
+
   -- FFI float picker options
   lib_path = nil, -- nil -> <plugin>/build/libpp_nvim.so
   default_mode = 'substring', -- substring | fuzzy | prefix | subseq (see `:PpSearch`)

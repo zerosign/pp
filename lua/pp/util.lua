@@ -17,34 +17,37 @@ function M.notify(msg, level)
   end
 end
 
---- Resolve the project root for `buf` (default 0):
---- LSP root -> `.git` root -> buffer directory -> current working directory.
+--- Resolve the normalized project root for `buf` (default 0):
+--- 1. Active LSP client root_dir on `buf`
+--- 2. Nearest ancestor containing any `config.options.project_markers`
+---    (`.git`, `go.mod`, `Cargo.toml`, `package.json` — matching Rust core)
+--- 3. Buffer directory -> current working directory.
 function M.project_root(buf)
   buf = buf or 0
   for _, client in ipairs(vim.lsp.get_clients({ bufnr = buf })) do
     if client.config and client.config.root_dir and client.config.root_dir ~= '' then
-      return client.config.root_dir
+      return vim.fs.normalize(client.config.root_dir)
     end
   end
-  local git_root = vim.fs.root(buf, '.git')
-  if git_root then
-    return git_root
+  local config = require('pp.config')
+  local markers = (config.options and config.options.project_markers)
+    or { '.git', 'go.mod', 'Cargo.toml', 'package.json' }
+  local marker_root = vim.fs.root(buf, markers)
+  if marker_root then
+    return vim.fs.normalize(marker_root)
   end
   local buf_name = vim.api.nvim_buf_get_name(buf)
   if buf_name ~= '' then
-    return vim.fs.dirname(buf_name)
+    return vim.fs.normalize(vim.fs.dirname(buf_name))
   end
-  return vim.fn.getcwd()
+  return vim.fs.normalize(vim.fn.getcwd())
 end
 
---- Select from a list via Snacks.picker.select when available, else vim.ui.select.
+--- Picker-agnostic selection helper: defers to `vim.ui.select` (just like
+--- `picker.lua`), which the user's UI provider (snacks, fzf-lua, telescope, ...)
+--- or Neovim's built-in handles without hardcoding any third-party plugin.
 function M.select(items, opts, on_choice)
-  local ok, snacks = pcall(require, 'snacks')
-  if ok and snacks.picker and snacks.picker.select then
-    snacks.picker.select(items, opts, on_choice)
-  else
-    vim.ui.select(items, opts, on_choice)
-  end
+  vim.ui.select(items, opts, on_choice)
 end
 
 return M

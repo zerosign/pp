@@ -54,7 +54,7 @@ end
 
 local function resolve_path(path, callback)
   if path and path ~= '' then
-    local expanded = vim.fn.expand(path)
+    local expanded = vim.fs.normalize(vim.fn.expand(path))
     if vim.fn.isdirectory(expanded) ~= 0 then
       callback(expanded)
     else
@@ -64,7 +64,7 @@ local function resolve_path(path, callback)
   end
 
   local root = util.project_root(0)
-  if root and root ~= '' then
+  if root and root ~= '' and vim.fn.isdirectory(root) ~= 0 then
     callback(root)
   else
     vim.ui.input({
@@ -75,7 +75,7 @@ local function resolve_path(path, callback)
       if not input_path or input_path == '' then
         return
       end
-      local expanded = vim.fn.expand(input_path)
+      local expanded = vim.fs.normalize(vim.fn.expand(input_path))
       if vim.fn.isdirectory(expanded) == 0 then
         util.notify('Not a valid directory: ' .. expanded, vim.log.levels.ERROR)
         return
@@ -86,13 +86,14 @@ local function resolve_path(path, callback)
 end
 
 local function add_project_to_profile(profile_name, project_path)
+  project_path = vim.fs.normalize(project_path)
   local profiles = load_data()
   if not profiles[profile_name] then
     profiles[profile_name] = {}
   end
 
   for _, p in ipairs(profiles[profile_name]) do
-    if p == project_path then
+    if vim.fs.normalize(p) == project_path then
       util.notify(
         string.format("Project already marked in workspace '%s'", profile_name),
         vim.log.levels.INFO
@@ -317,7 +318,7 @@ function M.list()
   end)
 end
 
---- List all projects in active workspace profile and open the chosen one.
+--- List all projects in active workspace profile using pp's floating picker.
 function M.projects()
   local profiles = load_data()
   local projs = get_active_profile_projects(profiles)
@@ -333,24 +334,16 @@ function M.projects()
     return
   end
 
-  local entries = {}
-  for _, path in ipairs(projs) do
-    table.insert(entries, string.format('%s\t(%s)', vim.fs.basename(path), path))
+  local normalized = {}
+  for i, p in ipairs(projs) do
+    normalized[i] = vim.fs.normalize(p)
   end
 
-  util.select(
-    entries,
-    { prompt = string.format('Projects (%s)> ', current_profile) },
-    function(choice)
-      if not choice then
-        return
-      end
-      local target_path = choice:match('%((.+)%)$')
-      if target_path then
-        M.open_workspace(target_path)
-      end
-    end
-  )
+  require('pp.picker').pick({
+    items = normalized,
+    prompt = string.format('Workspace (%s) > ', current_profile),
+    on_select = M.open_workspace,
+  })
 end
 
 return M

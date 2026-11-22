@@ -60,6 +60,10 @@ end
 function M.reindex()
   notify('Rebuilding pp index...')
   run({ 'index' }, function()
+    local ok, picker = pcall(require, 'pp.picker')
+    if ok and picker.refresh then
+      picker.refresh()
+    end
     notify('pp index rebuilt')
   end)
 end
@@ -67,6 +71,10 @@ end
 --- Clear the index; the next lookup rebuilds automatically.
 function M.clear()
   run({ 'clear' }, function()
+    local ok, picker = pcall(require, 'pp.picker')
+    if ok and picker.refresh then
+      picker.refresh()
+    end
     notify('pp index cleared')
   end)
 end

@@ -1,16 +1,27 @@
 -- pp.nvim — per-project region bookmarks.
 --
 -- Storage: `<project-root>/.nvim/collection.json`
--- Project root resolved via `pp.util.project_root()` (LSP -> .git -> buffer dir -> CWD).
+-- Project root is always resolved dynamically from the active buffer/tab via
+-- `pp.util.project_root(0)` (never cached in a stale module global). File paths
+-- inside `collection.json` are stored relative to `<project-root>` so bookmarks
+-- remain portable if the repository is moved or renamed.
 
 local util = require('pp.util')
 
 local M = {}
 
-local current_root = nil
-
 local function collection_file(root)
   return vim.fs.joinpath(root, '.nvim', 'collection.json')
+end
+
+local function resolve_entry_path(root, entry_path)
+  if not entry_path or entry_path == '' then
+    return ''
+  end
+  if entry_path:sub(1, 1) == '/' then
+    return vim.fs.normalize(entry_path)
+  end
+  return vim.fs.normalize(vim.fs.joinpath(root, entry_path))
 end
 
 local function load_entries(root)
@@ -55,24 +66,36 @@ local function show_region(entry)
   end
 end
 
-local function goto_entry(entry, opener)
-  if vim.fn.filereadable(entry.path) == 0 then
-    util.notify('Bookmark file not found: ' .. entry.path, vim.log.levels.ERROR)
+--- Jump to a bookmark within the current tabpage (never yanking focus across
+--- unrelated workspace tabs).
+local function goto_entry(root, entry, opener)
+  local abs_path = resolve_entry_path(root, entry.path)
+  if vim.fn.filereadable(abs_path) == 0 then
+    util.notify('Bookmark file not found: ' .. abs_path, vim.log.levels.ERROR)
     return
   end
 
-  local bufnr = vim.fn.bufnr(entry.path)
-  local wids = bufnr > 0 and vim.fn.win_findbuf(bufnr) or {}
-  if #wids > 0 then
-    vim.api.nvim_set_current_win(wids[1])
+  local bufnr = vim.fn.bufnr(abs_path)
+  local target_win = nil
+  if bufnr > 0 then
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.api.nvim_win_get_buf(win) == bufnr then
+        target_win = win
+        break
+      end
+    end
+  end
+
+  if target_win then
+    vim.api.nvim_set_current_win(target_win)
   else
-    opener(entry.path)
+    opener(abs_path)
   end
 
   show_region(entry)
 end
 
---- Add the current visual selection to the project's collection.
+--- Add the current visual selection to the current project's collection.
 function M.add()
   local mode = vim.fn.mode()
   if mode ~= 'v' and mode ~= 'V' and mode ~= '\22' then
@@ -85,6 +108,7 @@ function M.add()
     util.notify('Buffer has no file path', vim.log.levels.WARN)
     return
   end
+  buf_path = vim.fs.normalize(buf_path)
 
   local start_line = math.min(vim.fn.line('v'), vim.fn.line('.'))
   local end_line = math.max(vim.fn.line('v'), vim.fn.line('.'))
@@ -93,9 +117,10 @@ function M.add()
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'x', false)
 
   local root = util.project_root(0)
+  local rel_path = vim.fs.relpath(root, buf_path) or buf_path
   local entries = load_entries(root)
   table.insert(entries, {
-    path = buf_path,
+    path = rel_path,
     start = start_line,
     ['end'] = end_line,
     text = text,
@@ -115,10 +140,10 @@ function M.add()
   )
 end
 
---- Open the picker over this project's bookmarks.
+--- Open the picker over the current project's bookmarks.
 function M.pick()
-  current_root = util.project_root(0)
-  local entries = load_entries(current_root)
+  local root = util.project_root(0)
+  local entries = load_entries(root)
   if #entries == 0 then
     util.notify('No bookmarks for this project yet.', vim.log.levels.INFO)
     return
@@ -126,13 +151,14 @@ function M.pick()
 
   local items = {}
   for idx, entry in ipairs(entries) do
-    local rel = vim.fs.relpath(current_root, entry.path) or entry.path
+    local abs_path = resolve_entry_path(root, entry.path)
+    local rel = vim.fs.relpath(root, abs_path) or entry.path
     local range = string.format('%s:%d-%d', rel, entry.start or 1, entry['end'] or entry.start or 1)
     local snippet = (type(entry.text) == 'table' and entry.text[1]) and (' │ ' .. entry.text[1])
       or ''
     table.insert(items, {
       text = string.format('%3d │ %s%s', idx, range, snippet),
-      file = entry.path,
+      file = abs_path,
       pos = { entry.start or 1, 0 },
       entry = entry,
     })
@@ -141,7 +167,7 @@ function M.pick()
   local ok, snacks = pcall(require, 'snacks')
   if ok and snacks.picker then
     snacks.picker({
-      title = 'Collection',
+      title = 'Collection (' .. vim.fs.basename(root) .. ')',
       items = items,
       format = function(item)
         return { { item.text } }
@@ -149,21 +175,21 @@ function M.pick()
       confirm = function(picker, item)
         picker:close()
         if item and item.entry then
-          goto_entry(item.entry, function(p)
+          goto_entry(root, item.entry, function(p)
             vim.cmd.edit(vim.fn.fnameescape(p))
           end)
         end
       end,
     })
   else
-    vim.ui.select(items, {
-      prompt = 'Collection> ',
+    util.select(items, {
+      prompt = 'Collection (' .. vim.fs.basename(root) .. ')> ',
       format_item = function(item)
         return item.text
       end,
     }, function(item)
       if item and item.entry then
-        goto_entry(item.entry, function(p)
+        goto_entry(root, item.entry, function(p)
           vim.cmd.edit(vim.fn.fnameescape(p))
         end)
       end
@@ -171,13 +197,14 @@ function M.pick()
   end
 end
 
---- Delete a bookmark entry.
-function M.delete_entry(entry)
-  local root = current_root or util.project_root(0)
+--- Delete a bookmark entry from the current project's collection.
+function M.delete_entry(entry, root)
+  root = root or util.project_root(0)
+  local target_abs = resolve_entry_path(root, entry.path)
   local entries = load_entries(root)
   for i, e in ipairs(entries) do
     if
-      e.path == entry.path
+      resolve_entry_path(root, e.path) == target_abs
       and (e.start or 0) == (entry.start or 0)
       and (e['end'] or 0) == (entry['end'] or 0)
     then

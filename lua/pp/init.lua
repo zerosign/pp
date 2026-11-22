@@ -123,25 +123,28 @@ local function open_in_tab(path)
   if not path or path == '' then
     return
   end
+  local target = vim.fs.normalize(vim.fn.expand(path))
   -- Schedule so any picker window closes cleanly first.
   vim.schedule(function()
     for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-      local tab_cwd = vim.fn.getcwd(-1, vim.api.nvim_tabpage_get_number(tabpage))
-      if tab_cwd == path then
+      local tab_nr = vim.api.nvim_tabpage_get_number(tabpage)
+      local tab_cwd = vim.fs.normalize(vim.fn.getcwd(-1, tab_nr))
+      if tab_cwd == target then
         vim.api.nvim_set_current_tabpage(tabpage)
-        util.notify('Focusing active tab: ' .. vim.fs.basename(path))
+        util.notify('Focusing active tab: ' .. vim.fs.basename(target))
         return
       end
     end
 
     vim.cmd('tabnew')
-    vim.cmd('tcd ' .. vim.fn.fnameescape(path))
-    open_files(path)
-    util.notify('Opened workspace: ' .. vim.fs.basename(path))
+    vim.cmd('tcd ' .. vim.fn.fnameescape(target))
+    open_files(target)
+    util.notify('Opened workspace: ' .. vim.fs.basename(target))
   end)
 end
 
 M.open_in_tab = open_in_tab
+M.project_root = util.project_root
 
 --- Pick a project, open it in a new tab, `tcd` into it, then open its files.
 function M.switch_project_in_new_tab()
@@ -161,7 +164,8 @@ function M.search(mode)
   })
 end
 
---- Pick a project and switch the current window's cwd to it.
+--- Pick a project and switch the current tab's cwd (`:tcd`) to it without
+--- mutating other tabs' working directories.
 function M.switch_project()
   picker.pick({
     prompt = 'Switch Project> ',
@@ -169,8 +173,11 @@ function M.switch_project()
       if not path or path == '' then
         return
       end
-      vim.api.nvim_set_current_dir(path)
-      open_files(path)
+      local target = vim.fs.normalize(vim.fn.expand(path))
+      vim.schedule(function()
+        vim.cmd('tcd ' .. vim.fn.fnameescape(target))
+        open_files(target)
+      end)
     end,
   })
 end

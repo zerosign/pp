@@ -170,6 +170,7 @@ local state = {
   buf = nil,
   win = nil,
   prompt = nil,
+  items = nil, -- optional scoped project list (e.g. active workspace profile)
   results = {},
   cursor = 1,
   offset = 1, -- index of the first result row currently rendered in the window
@@ -205,6 +206,7 @@ local function reset_state()
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
   state.win, state.buf = nil, nil
+  state.items = nil
   state.results, state.cursor, state.offset = {}, 1, 1
 end
 
@@ -280,6 +282,74 @@ local function render()
   end
 end
 
+--- Filter an explicit scoped list of project paths in Lua, mirroring the Rust
+--- `SearchMode::score` ranking (Exact basename -> Prefix basename -> Other).
+local function filter_scoped_items(items, query, mode, limit)
+  if query == '' then
+    local out = {}
+    local max_n = (limit and limit > 0) and math.min(#items, limit) or #items
+    for i = 1, max_n do
+      out[i] = items[i]
+    end
+    return out
+  end
+
+  local q = query:lower()
+  local exact, prefix, other = {}, {}, {}
+  for i = 1, #items do
+    local repo = items[i]
+    local base = vim.fs.basename(repo):lower()
+    local matched
+    if mode == 'prefix' then
+      matched = base:sub(1, #q) == q
+    elseif mode == 'subseq' then
+      local pos = 1
+      matched = true
+      for c = 1, #q do
+        local ch = q:byte(c)
+        local found = false
+        while pos <= #base do
+          local b = base:byte(pos)
+          pos = pos + 1
+          if b == ch then
+            found = true
+            break
+          end
+        end
+        if not found then
+          matched = false
+          break
+        end
+      end
+    else
+      -- substring / fuzzy fallback over scoped list
+      matched = repo:lower():find(q, 1, true) ~= nil
+    end
+
+    if matched then
+      if base == q then
+        exact[#exact + 1] = repo
+      elseif base:sub(1, #q) == q then
+        prefix[#prefix + 1] = repo
+      else
+        other[#other + 1] = repo
+      end
+    end
+  end
+
+  local out = {}
+  local max_n = (limit and limit > 0) and limit or math.huge
+  for _, list in ipairs({ exact, prefix, other }) do
+    for i = 1, #list do
+      if #out >= max_n then
+        return out
+      end
+      out[#out + 1] = list[i]
+    end
+  end
+  return out
+end
+
 local function do_search()
   if not state.win or not vim.api.nvim_win_is_valid(state.win) then
     return
@@ -289,7 +359,12 @@ local function do_search()
   if query == '' then
     mode = 'substring' -- empty query lists everything
   end
-  local results = search(query, mode, config.options.max_results)
+  local results
+  if state.items then
+    results = filter_scoped_items(state.items, query, mode, config.options.max_results)
+  else
+    results = search(query, mode, config.options.max_results)
+  end
   if results == nil then
     state.results = {}
     vim.api.nvim_buf_set_lines(state.buf, 1, -1, false, { '  (search error)' })
@@ -372,6 +447,7 @@ local function open_float(opts)
 
   local mode = opts.mode or config.options.default_mode
   state.mode = MODES[mode] and mode or 'substring'
+  state.items = opts.items
   state.on_select = opts.on_select
   state.prompt = opts.prompt or config.options.prompt
 
@@ -574,7 +650,7 @@ local function resolve_files_picker()
 end
 
 local function pick_custom(opts)
-  projects.list(function(list)
+  local function handle_list(list)
     if #list == 0 then
       util.notify('No projects found. Run `:PpIndex` to build the index.', vim.log.levels.WARN)
       return
@@ -588,21 +664,30 @@ local function pick_custom(opts)
       custom.pick(list, opts)
       return
     end
-    -- No custom handler (or a bare provider string): defer to `vim.ui.select`,
-    -- which the user's picker wires up (snacks, telescope-ui-select, fzf-lua's
-    -- ui-select, ...) or Neovim's built-in provides. This keeps the fallback
-    -- free of any hard picker dependency.
     vim.ui.select(list, { prompt = opts.prompt or config.options.prompt }, function(choice)
       if choice then
         opts.on_select(choice)
       end
     end)
-  end)
+  end
+
+  if opts.items then
+    handle_list(opts.items)
+  else
+    projects.list(handle_list)
+  end
 end
 
 -- ---------------------------------------------------------------------------
 -- Public API
 -- ---------------------------------------------------------------------------
+
+--- Reload the FFI in-memory repository cache immediately if the cdylib is loaded.
+function M.refresh()
+  if lib then
+    lib.pp_refresh()
+  end
+end
 
 --- The picker function used for the post-selection `files` step.
 --- Called as `fn({ cwd = path, prompt = prompt })`.
@@ -610,13 +695,13 @@ function M.get_files()
   return resolve_files_picker()
 end
 
---- Open the project picker. `opts`: `prompt`, `mode`, `on_select(path)`.
+--- Open the project picker. `opts`: `prompt`, `mode`, `items`, `on_select(path)`.
 function M.pick(opts)
   if config.options.picker then
     pick_custom(opts)
     return
   end
-  if load_lib() then
+  if opts.items or load_lib() then
     open_float(opts)
     return
   end
