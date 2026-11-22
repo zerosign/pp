@@ -226,12 +226,16 @@ fn pick_repo(items: &[&str]) -> io::Result<Option<usize>> {
         match term.read_key()? {
             Key::Enter if !filtered.is_empty() => break Some(filtered[selected].0),
             Key::Escape => break None,
-            Key::ArrowUp if !filtered.is_empty() => {
-                selected = selected.saturating_sub(1);
-            }
+            Key::ArrowUp if !filtered.is_empty() => selected = selected.saturating_sub(1),
             Key::ArrowDown if !filtered.is_empty() => {
                 selected = (selected + 1).min(filtered.len() - 1);
             }
+            Key::PageUp if !filtered.is_empty() => selected = selected.saturating_sub(rows),
+            Key::PageDown if !filtered.is_empty() => {
+                selected = (selected + rows).min(filtered.len() - 1);
+            }
+            Key::Home if !filtered.is_empty() => selected = 0,
+            Key::End if !filtered.is_empty() => selected = filtered.len() - 1,
             Key::Backspace => {
                 query.pop();
                 selected = 0;

@@ -442,6 +442,14 @@ local function move_prev()
   move_selection(-1)
 end
 
+local function move_page_down()
+  move_selection(visible_count())
+end
+
+local function move_page_up()
+  move_selection(-visible_count())
+end
+
 local function noop() end
 
 local function open_float(opts)
@@ -542,6 +550,8 @@ local function open_float(opts)
     ['<C-p>'] = move_prev,
     ['<Down>'] = move_next,
     ['<Up>'] = move_prev,
+    ['<PageDown>'] = move_page_down,
+    ['<PageUp>'] = move_page_up,
   }
   for lhs, fn in pairs(actions) do
     imap(lhs, fn)
