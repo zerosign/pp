@@ -125,12 +125,23 @@ local function open_in_tab(path)
   end
   -- Schedule so any picker window closes cleanly first.
   vim.schedule(function()
+    for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+      local tab_cwd = vim.fn.getcwd(-1, vim.api.nvim_tabpage_get_number(tabpage))
+      if tab_cwd == path then
+        vim.api.nvim_set_current_tabpage(tabpage)
+        util.notify('Focusing active tab: ' .. vim.fs.basename(path))
+        return
+      end
+    end
+
     vim.cmd('tabnew')
     vim.cmd('tcd ' .. vim.fn.fnameescape(path))
     open_files(path)
     util.notify('Opened workspace: ' .. vim.fs.basename(path))
   end)
 end
+
+M.open_in_tab = open_in_tab
 
 --- Pick a project, open it in a new tab, `tcd` into it, then open its files.
 function M.switch_project_in_new_tab()
@@ -164,4 +175,14 @@ function M.switch_project()
   })
 end
 
-return M
+-- Lazy-load `pp.workspace` and `pp.collection` on first field access so
+-- neither is parsed during standard `:PpSearch` / `:PpProject` use.
+return setmetatable(M, {
+  __index = function(t, k)
+    if k == 'workspace' or k == 'collection' then
+      local mod = require('pp.' .. k)
+      rawset(t, k, mod)
+      return mod
+    end
+  end,
+})
