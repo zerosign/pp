@@ -31,7 +31,14 @@ local function run(args, on_success)
       return
     end
     if on_success then
-      on_success(obj.stdout or '')
+      local out = obj.stdout or ''
+      if vim.in_fast_event() then
+        vim.schedule(function()
+          on_success(out)
+        end)
+      else
+        on_success(out)
+      end
     end
   end)
 end

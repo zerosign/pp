@@ -146,14 +146,6 @@ end
 M.open_in_tab = open_in_tab
 M.project_root = util.project_root
 
---- Pick a project, open it in a new tab, `tcd` into it, then open its files.
-function M.switch_project_in_new_tab()
-  picker.pick({
-    prompt = config.options.prompt,
-    on_select = open_in_tab,
-  })
-end
-
 --- Pick a project in `mode` (substring|fuzzy|prefix|subseq), then open it in a
 --- new tab. The default mode applies when `mode` is nil.
 function M.search(mode)
@@ -162,6 +154,11 @@ function M.search(mode)
     mode = mode,
     on_select = open_in_tab,
   })
+end
+
+--- Alias of `M.search()` for `:PpProject`.
+function M.switch_project_in_new_tab()
+  M.search(nil)
 end
 
 --- Pick a project and switch the current tab's cwd (`:tcd`) to it without

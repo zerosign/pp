@@ -436,28 +436,10 @@ fn is_stale(db_path: &Path, config: &Config) -> bool {
 /// Returns an error when the cache directory cannot be created, the archive
 /// cannot be serialized, or the temp file cannot be written or renamed.
 pub fn write_cache(cache_dir: &Path, db_path: &Path, repos: &[String]) -> Result<()> {
-    fs::create_dir_all(cache_dir)?;
-
-    let file_name = db_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("pp.cache");
-    let tmp_path = db_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
-
     let mut sorted = repos.to_vec();
     sorted.sort();
     sorted.dedup();
-
-    let cache = RepoCache {
-        magic: CACHE_MAGIC,
-        version: CACHE_VERSION,
-        repos: sorted,
-    };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cache)?;
-
-    fs::write(&tmp_path, &bytes[..])?;
-    fs::rename(&tmp_path, db_path)?;
-    Ok(())
+    write_sorted_cache(cache_dir, db_path, sorted)
 }
 
 /// Write path: scan roots and persist the cache.
@@ -474,7 +456,7 @@ pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<
     eprintln!("Scanning repositories to build cache...");
 
     let repo_strings = to_sorted_strings(scan_repos(config));
-    write_cache(cache_dir, db_path, &repo_strings)?;
+    write_sorted_cache(cache_dir, db_path, repo_strings.clone())?;
 
     eprintln!(
         "Cached {} repositories in {:.2?}.",
@@ -483,6 +465,27 @@ pub fn reindex(config: &Config, cache_dir: &Path, db_path: &Path) -> Result<Vec<
     );
 
     Ok(repo_strings)
+}
+
+fn write_sorted_cache(cache_dir: &Path, db_path: &Path, sorted: Vec<String>) -> Result<()> {
+    fs::create_dir_all(cache_dir)?;
+
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("pp.cache");
+    let tmp_path = db_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
+
+    let cache = RepoCache {
+        magic: CACHE_MAGIC,
+        version: CACHE_VERSION,
+        repos: sorted,
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cache)?;
+
+    fs::write(&tmp_path, &bytes[..])?;
+    fs::rename(&tmp_path, db_path)?;
+    Ok(())
 }
 
 /// The state of the on-disk cache; decides between serving from cache and
@@ -655,20 +658,20 @@ pub fn basename(path: &str) -> &str {
 }
 
 /// Edit distance between `a` and `b` (Levenshtein over Unicode scalar values).
+/// Reuses two row buffers via `std::mem::swap` instead of allocating per character.
 fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let m = b.len();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = b_chars.len();
 
     let mut prev: Vec<usize> = (0..=m).collect();
-    for (i, ac) in a.iter().enumerate() {
-        let mut curr = vec![0usize; m + 1];
+    let mut curr: Vec<usize> = vec![0usize; m + 1];
+    for (i, ac) in a.chars().enumerate() {
         curr[0] = i + 1;
-        for (j, bc) in b.iter().enumerate() {
+        for (j, &bc) in b_chars.iter().enumerate() {
             let substitution = prev[j] + usize::from(ac != bc);
             curr[j + 1] = substitution.min(prev[j + 1] + 1).min(curr[j] + 1);
         }
-        prev = curr;
+        std::mem::swap(&mut prev, &mut curr);
     }
     prev[m]
 }
@@ -681,7 +684,7 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 
 /// Search an already-loaded repository list.
 ///
-/// The core of [`search`] split out so callers that hold their own cached
+/// The core of search split out so callers that hold their own cached
 /// [`Cache`] (notably the picker and the nvim FFI bridge) can search borrowed
 /// paths without re-reading or re-allocating the list. Results are ranked
 /// (fuzzy by edit distance; otherwise exact basename, basename prefix, then the
@@ -707,51 +710,6 @@ pub fn search_matches<'a>(
         .take(limit.unwrap_or(usize::MAX))
         .map(|(_, repo)| repo)
         .collect()
-}
-
-/// Search the cached repository list.
-///
-/// `distance` only applies to [`SearchMode::Fuzzy`]; `limit` caps the number
-/// of returned results (`None` for unlimited).
-///
-/// This returns owned `String`s for callers that need to outlive the cache
-/// (e.g. the nvim FFI bridge). Prefer [`search_matches`] with a borrowed
-/// [`Cache::paths`] view when the cache stays in scope.
-///
-/// # Errors
-///
-/// Returns an error when the repository list cannot be loaded (see
-/// [`get_repos`]).
-pub fn search(
-    config: &Config,
-    cache_dir: &Path,
-    db_path: &Path,
-    query: &str,
-    mode: SearchMode,
-    distance: u32,
-    limit: Option<usize>,
-) -> Result<Vec<String>> {
-    let cache = get_repos(config, cache_dir, db_path, false)?;
-    Ok(search_matches(&cache.paths(), query, mode, distance, limit)
-        .into_iter()
-        .map(str::to_string)
-        .collect())
-}
-
-/// Search the cached repository list for paths containing `query`
-/// (case-insensitive substring; the default mode).
-///
-/// # Errors
-///
-/// Returns an error when the repository list cannot be loaded (see
-/// [`get_repos`]).
-pub fn search_repos(
-    config: &Config,
-    cache_dir: &Path,
-    db_path: &Path,
-    query: &str,
-) -> Result<Vec<String>> {
-    search(config, cache_dir, db_path, query, SearchMode::Substring, 0, None)
 }
 
 #[cfg(test)]

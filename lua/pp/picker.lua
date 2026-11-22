@@ -433,6 +433,17 @@ local function cancel()
   close_float()
 end
 
+-- Hoisted action closures so open_float never allocates fresh closures per open.
+local function move_next()
+  move_selection(1)
+end
+
+local function move_prev()
+  move_selection(-1)
+end
+
+local function noop() end
+
 local function open_float(opts)
   -- Re-entrancy guard: if a picker is already open (double keypress, a
   -- programmatic `pick`, or one left behind when its window was closed by
@@ -492,11 +503,11 @@ local function open_float(opts)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
 
   -- Completion plugins (blink.cmp, nvim-cmp) would auto-open their popup over
-  -- the results while typing. Both expose per-buffer kill switches; the float
-  -- is current after nvim_open_win(enter=true), so cmp.setup.buffer applies.
+  -- the results while typing. Check package.loaded['cmp'] instead of pcall(require)
+  -- so we never scan package.path on disk when nvim-cmp is not installed.
   vim.b[buf].completion = false -- blink.cmp
-  local ok_cmp, cmp = pcall(require, 'cmp')
-  if ok_cmp then
+  local cmp = package.loaded['cmp']
+  if type(cmp) == 'table' and cmp.setup and cmp.setup.buffer then
     cmp.setup.buffer({ enabled = false }) -- nvim-cmp
   end
 
@@ -527,18 +538,10 @@ local function open_float(opts)
     ['<Esc>'] = cancel,
     ['<C-c>'] = cancel,
     ['<C-f>'] = cycle_mode,
-    ['<C-n>'] = function()
-      move_selection(1)
-    end,
-    ['<C-p>'] = function()
-      move_selection(-1)
-    end,
-    ['<Down>'] = function()
-      move_selection(1)
-    end,
-    ['<Up>'] = function()
-      move_selection(-1)
-    end,
+    ['<C-n>'] = move_next,
+    ['<C-p>'] = move_prev,
+    ['<Down>'] = move_next,
+    ['<Up>'] = move_prev,
   }
   for lhs, fn in pairs(actions) do
     imap(lhs, fn)
@@ -548,17 +551,11 @@ local function open_float(opts)
   -- would allow line ops (dd, x, p...) to delete the query row, which pulls
   -- result text up into the editable query line and corrupts the picker.
   -- Swallow the escape hatches; the nmaps above stay as a safety net.
-  imap('<C-o>', function() end)
-  imap('<C-\\><C-n>', function() end)
+  imap('<C-o>', noop)
+  imap('<C-\\><C-n>', noop)
 
-  nmap('j', function()
-    move_selection(1)
-  end)
-
-  nmap('k', function()
-    move_selection(-1)
-  end)
-
+  nmap('j', move_next)
+  nmap('k', move_prev)
   nmap('q', cancel)
 
   -- `nvim_win_set_cursor` clamps to the last character; `startinsert!`

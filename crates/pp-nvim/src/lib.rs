@@ -1,93 +1,17 @@
-//! `pp-nvim` — expose pp's cache & search functions for Neovim.
-//!
-//! Two layers:
-//!
-//! - a pure-Rust API (rlib) mirroring the previous surface, for tests and Rust
-//!   consumers;
-//! - an FFI surface (`cdylib`, `libpp_nvim.so`) for Neovim: `pp_search`,
-//!   `pp_string_free` and `pp_refresh`, called from `LuaJIT` via `ffi.load`.
-//!
-//! The picker and keymaps live on the plugin side (`plugin/init.lua`).
+//! `pp-nvim` — FFI surface (`cdylib`, `libpp_nvim.so`) exposing `pp`'s cache &
+//! search functions to Neovim (`pp_search`, `pp_string_free`, `pp_refresh`),
+//! called from `LuaJIT` via `ffi.load`.
 
-use std::path::PathBuf;
-
-pub use pp::{Config, cache_paths, get_cache_path, get_config_path, load_config};
-
-/// Result type re-exported for convenience.
-pub type Result<T> = pp::Result<T>;
-
-/// Rebuild the cache from scratch; returns the number of cached repositories.
-///
-/// # Errors
-///
-/// Returns an error when the cache directory or cache path cannot be
-/// resolved, or when the rebuild fails (see [`pp::reindex`]).
-pub fn rebuild_index() -> Result<usize> {
-    let config = pp::load_config();
-    let (cache_dir, db_path) = pp::cache_paths()?;
-    let repos = pp::reindex(&config, &cache_dir, &db_path)?;
-    Ok(repos.len())
-}
-
-/// List all cached repositories (auto-rebuilds the cache if missing or stale).
-///
-/// # Errors
-///
-/// Returns an error when the cache paths cannot be resolved or a required
-/// rebuild fails (see [`pp::get_repos`]).
-pub fn list_repos() -> Result<Vec<String>> {
-    let config = pp::load_config();
-    let (cache_dir, db_path) = pp::cache_paths()?;
-    Ok(pp::get_repos(&config, &cache_dir, &db_path, false)?
-        .paths()
-        .into_iter()
-        .map(str::to_string)
-        .collect())
-}
-
-/// List repositories with a live scan, bypassing the cache.
-///
-/// # Errors
-///
-/// Returns an error when the cache paths cannot be resolved or the scan fails.
-pub fn fresh_repos() -> Result<Vec<String>> {
-    let config = pp::load_config();
-    let (cache_dir, db_path) = pp::cache_paths()?;
-    Ok(pp::get_repos(&config, &cache_dir, &db_path, true)?
-        .paths()
-        .into_iter()
-        .map(str::to_string)
-        .collect())
-}
-
-/// Case-insensitive substring search over the cached repository list.
-///
-/// # Errors
-///
-/// Returns an error when the repository list cannot be loaded (see
-/// [`pp::get_repos`]).
-pub fn search_repos(query: &str) -> Result<Vec<String>> {
-    let config = pp::load_config();
-    let (cache_dir, db_path) = pp::cache_paths()?;
-    pp::search_repos(&config, &cache_dir, &db_path, query)
-}
-
-/// The cache file path (useful for cache-busting or display on the plugin side).
-///
-/// # Errors
-///
-/// Returns an error when the cache directory cannot be resolved (see
-/// [`pp::cache_paths`]).
-pub fn index_db_path() -> Result<PathBuf> {
-    Ok(pp::cache_paths()?.1)
-}
+pub use pp::{Config, Result, cache_paths, get_cache_path, get_config_path, load_config};
 
 /// FFI bridge for Neovim.
 ///
-/// The repository list is cached in a process-global `RwLock` so per-keystroke
-/// searches never re-read the cache file. Every call compares the cache file's
-/// mtime against the cached one and reloads on change, so a reindex performed
-/// by another process (e.g. `pp index` or `:PpIndex`) is picked up lazily.
+/// The memmapped [`pp::Cache`] is held in a process-global `RwLock` so
+/// per-keystroke searches borrow `&str`s zero-copy straight from the mapping
+/// under a single read lock without cloning `String`s. Every call compares the
+/// cache file's mtime against the cached one and reloads on change, so a
+/// reindex performed by another process (`pp index` or `:PpIndex`) is picked up
+/// automatically.
 pub mod ffi {
     use super::Result;
     use std::ffi::{CStr, CString, c_char};
@@ -95,18 +19,18 @@ pub mod ffi {
     use std::sync::{OnceLock, PoisonError, RwLock};
     use std::time::SystemTime;
 
-    struct Cache {
-        repos: Vec<String>,
-        /// mtime of `pp.cache` when `repos` was loaded.
+    struct State {
+        cache: Option<pp::Cache>,
+        /// mtime of `pp.cache` when `cache` was mapped.
         db_mtime: Option<SystemTime>,
     }
 
-    fn cache() -> &'static RwLock<Cache> {
-        static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();
+    fn state() -> &'static RwLock<State> {
+        static STATE: OnceLock<RwLock<State>> = OnceLock::new();
 
-        CACHE.get_or_init(|| {
-            RwLock::new(Cache {
-                repos: Vec::new(),
+        STATE.get_or_init(|| {
+            RwLock::new(State {
+                cache: None,
                 // Sentinel: guarantees a load on the first call even when the
                 // index file does not exist yet.
                 db_mtime: Some(SystemTime::UNIX_EPOCH),
@@ -114,12 +38,12 @@ pub mod ffi {
         })
     }
 
-    fn read_cache() -> std::sync::RwLockReadGuard<'static, Cache> {
-        cache().read().unwrap_or_else(PoisonError::into_inner)
+    fn read_state() -> std::sync::RwLockReadGuard<'static, State> {
+        state().read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn write_cache() -> std::sync::RwLockWriteGuard<'static, Cache> {
-        cache().write().unwrap_or_else(PoisonError::into_inner)
+    fn write_state() -> std::sync::RwLockWriteGuard<'static, State> {
+        state().write().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn index_mtime() -> Option<SystemTime> {
@@ -127,32 +51,32 @@ pub mod ffi {
         fs::metadata(db_path).ok()?.modified().ok()
     }
 
-    fn load_repos() -> Result<Vec<String>> {
+    fn open_cache() -> Result<pp::Cache> {
         let config = pp::load_config();
         let (cache_dir, db_path) = pp::cache_paths()?;
-        Ok(pp::get_repos(&config, &cache_dir, &db_path, false)?
-            .paths()
-            .into_iter()
-            .map(str::to_string)
-            .collect())
+        pp::get_repos(&config, &cache_dir, &db_path, false)
     }
 
-    /// Cached repository list, (re)loading it when the cache file changed or
-    /// first appeared since the last call.
-    fn repos() -> Result<Vec<String>> {
+    /// Run `f` against the borrowed repository paths from the mapped cache,
+    /// reloading the mapping only when `pp.cache`'s mtime changed.
+    fn with_repos<T>(f: impl FnOnce(&[&str]) -> T) -> Result<T> {
         let current = index_mtime();
-        if read_cache().db_mtime == current {
-            return Ok(read_cache().repos.clone());
+        {
+            let guard = read_state();
+            if guard.db_mtime == current
+                && let Some(ref cache) = guard.cache
+            {
+                let paths = cache.paths();
+                return Ok(f(&paths));
+            }
         }
 
-        let loaded = load_repos()?;
-        let mut guard = write_cache();
-        let current = index_mtime();
-        if guard.db_mtime != current {
-            guard.repos = loaded;
-            guard.db_mtime = current;
-        }
-        Ok(guard.repos.clone())
+        let loaded = open_cache()?;
+        let mut guard = write_state();
+        guard.db_mtime = index_mtime();
+        guard.cache = Some(loaded);
+        let paths = guard.cache.as_ref().expect("just stored").paths();
+        Ok(f(&paths))
     }
 
     fn mode_from_int(mode: i32) -> pp::SearchMode {
@@ -193,17 +117,11 @@ pub mod ffi {
                 .to_str()
                 .map_err(|err| format!("invalid UTF-8 query: {err}"))?;
 
-            let owned = repos()?;
-            let paths: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let matches = pp::search_matches(
-                &paths,
-                query,
-                mode_from_int(mode),
-                distance,
-                usize::try_from(limit).ok().filter(|n| *n > 0),
-            );
-
-            Ok(matches.join("\n"))
+            let search_mode = mode_from_int(mode);
+            let max_items = usize::try_from(limit).ok().filter(|n| *n > 0);
+            with_repos(|paths| {
+                pp::search_matches(paths, query, search_mode, distance, max_items).join("\n")
+            })
         })();
 
         match result {
@@ -231,10 +149,10 @@ pub mod ffi {
     /// Returns 1 on success, 0 on failure.
     #[unsafe(no_mangle)]
     pub extern "C" fn pp_refresh() -> i32 {
-        match load_repos() {
-            Ok(repos) => {
-                let mut guard = write_cache();
-                guard.repos = repos;
+        match open_cache() {
+            Ok(cache) => {
+                let mut guard = write_state();
+                guard.cache = Some(cache);
                 guard.db_mtime = index_mtime();
                 1
             }
