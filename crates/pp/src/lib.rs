@@ -333,10 +333,14 @@ fn scan_directory(
             continue;
         }
 
-        if dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| ignored_dirs.iter().any(|ignored| ignored == name))
+        // The root itself (depth == 0) must not be skipped even if its
+        // basename matches an entry in ignored_dirs (e.g. roots = ["~/Documents"]).
+        // Descendant directories are already filtered at queue time below.
+        if depth > 0
+            && dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| ignored_dirs.iter().any(|ignored| ignored == name))
         {
             continue;
         }
@@ -1013,6 +1017,38 @@ mod tests {
         ]
         .to_vec();
         assert_eq!(found, expected);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// When a user explicitly lists a root whose basename happens to match
+    /// `ignored_dirs` (e.g. `roots = ["~/Documents"]`), the root itself must
+    /// still be scanned; only its children should be pruned by `ignored_dirs`.
+    #[test]
+    #[cfg(unix)]
+    fn root_named_like_ignored_dir_is_not_skipped() {
+        let tmp = std::env::temp_dir().join(format!("pp-scan-ignored-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let docs = tmp.join("Documents");
+        let repo = docs.join("Jobs");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".git"), "").unwrap();
+
+        let mut found = Vec::new();
+        let config = Config {
+            roots: vec![docs.to_string_lossy().into_owned()],
+            ignored_dirs: vec!["Documents".to_string(), "node_modules".to_string()],
+            ..Config::default()
+        };
+        scan_directory(
+            Path::new(&config.roots[0]),
+            &mut found,
+            &mut Vec::new(),
+            &config,
+            &[],
+        );
+
+        assert_eq!(found, vec![repo]);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
